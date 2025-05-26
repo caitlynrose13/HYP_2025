@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "TLS Analyser",
+  "version": "1.0",
+  "description": "A Chrome extension built with Svelte to analyse a domains TLS configurations",
+  "action": {
+    "default_popup": "index.html"
+  },
+  "permissions": ["activeTab"]
+}
