@@ -1,7 +1,8 @@
 {
   "extends": "@tsconfig/svelte/tsconfig.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node", "chrome"],
+    "lib": ["DOM", "ESNext"]
   },
   "include": ["src/**/*", "vite.config.ts"],
   "exclude": ["node_modules", "dist"]

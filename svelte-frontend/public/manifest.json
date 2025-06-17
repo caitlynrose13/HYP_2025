@@ -4,7 +4,8 @@
   "version": "1.0",
   "description": "A Chrome extension built with Svelte to analyse a domains TLS configurations",
   "action": {
-    "default_popup": "index.html"
+    "default_popup": "svelte-frontend/index.html"
   },
-  "permissions": ["activeTab"]
+  "permissions": ["activeTab", "tabs"],
+  "host_permissions": ["http://127.0.0.1:8080/'"]
 }
