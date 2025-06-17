@@ -4,16 +4,17 @@ import { resolve } from "path";
 
 export default defineConfig({
   plugins: [svelte()],
-  publicDir: "public", //Files in the public/ folder will be served as static assets.
+  publicDir: "public",
   build: {
     outDir: "dist",
     rollupOptions: {
       input: {
-        popup: resolve(__dirname, "index.html"),
+        popup: resolve(__dirname, "index.html"), // popup page
       },
       output: {
         manualChunks: undefined,
-        entryFileNames: "popup.js",
+        entryFileNames: (chunk) =>
+          chunk.name === "popup" ? "popup.js" : "[name].js",
       },
     },
   },
