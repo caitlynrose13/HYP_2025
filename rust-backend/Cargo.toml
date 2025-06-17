@@ -1,0 +1,31 @@
+[package]
+name = "rust-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+# Async runtime
+tokio = { version = "1.38", features = ["full"] }
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+# Environment loading
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+uuid = { version = "1", features = ["v4", "serde"] }
+tower-http = { version = "0.5", features = ["cors"] } #prevetn CORS ERROR
+
+#tls dependencies
+rand = "0.8"
+p256 = "0.13"
