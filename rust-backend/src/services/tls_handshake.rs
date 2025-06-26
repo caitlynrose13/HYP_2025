@@ -1,5 +1,4 @@
 // Raw TLS handshake (no libraries like rustls or native-tls)
-use p256::NistP256;
 use p256::ecdh::EphemeralSecret; // Used to generate temporary EC key pairs
 use p256::elliptic_curve::sec1::ToEncodedPoint; // Convert EC pubkey to byte format
 use rand::Rng;
@@ -146,9 +145,10 @@ fn build_client_hello(domain: &str, tls_version: TlsVersion) -> Result<Vec<u8>, 
         let key_share_data_start_idx = extensions.len();
         extensions.extend_from_slice(&[0x00, 0x00]); // Placeholder for total key_share length
 
-        let secret = EphemeralSecret::<NistP256>::random(&mut rng);
-        let public_key = secret.public_share();
-        let public_bytes = public_key.to_encoded_point(false).to_vec();
+        let secret = EphemeralSecret::random(&mut rng);
+        let public_key = secret.public_key();
+        let encoded = public_key.to_encoded_point(false);
+        let public_bytes = encoded.as_bytes().to_vec();
 
         extensions.extend_from_slice(&[0x00, 0x17]); // Group = secp256r1
         extensions.extend_from_slice(&(public_bytes.len() as u16).to_be_bytes());

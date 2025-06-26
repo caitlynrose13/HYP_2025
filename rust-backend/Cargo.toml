@@ -9,7 +9,7 @@ edition = "2024"
 tokio = { version = "1.38", features = ["full"] }
 
 # Web framework
-axum = "0.7"
+axum = { version = "0.7", features = ["macros"] }
 tower = "0.4"
 
 # Serialization
@@ -28,4 +28,7 @@ tower-http = { version = "0.5", features = ["cors"] } #prevetn CORS ERROR
 
 #tls dependencies
 rand = "0.8"
-p256 = "0.13"
+p256 = { version = "0.13", features = ["ecdh"] }
+
+#certificate parsing
+x509-parser = "0.15"
