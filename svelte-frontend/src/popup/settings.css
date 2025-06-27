@@ -1,0 +1,142 @@
+
+.settings-page {
+  background-color: var(--background-color);
+  color: var(--text-color);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 20px;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  background-color: var(--header-bg-color);
+  padding: 10px 15px;
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+}
+
+.settings-header h1 {
+    margin: 0;
+  font-size: 1.2em;
+  color: var(--text-color);
+  text-align: center;
+   flex-grow: 1;
+}
+
+.setting-group {
+  background-color: var(--card-background-color);
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  margin: 20px;
+  padding: 20px;
+  border: 1px solid var(--border-color);
+}
+
+.setting-group h2 {
+  color: var(--text-color);
+  font-size: 1.1em;
+  margin-top: 0;
+  margin-bottom: 15px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.setting-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.setting-item:last-child {
+  border-bottom: none;
+}
+
+.setting-item .label-text {
+  color: var(--text-color);
+  font-size: 0.95em;
+  flex: 1;
+  cursor: pointer;
+  margin-right:1rem;
+}
+
+.static-item span {
+  color: var(--text-color);
+  font-size: 0.95em;
+}
+
+
+/* Toggle Switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink:0;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--border-color);
+  transition: .4s;
+  border-radius: 22px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--card-background-color);
+  transition: .4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--button-bg-color);
+}
+
+input:focus + .slider {
+  box-shadow: 0 0 1px var(--button-bg-color);
+}
+
+input:checked + .slider:before {
+  transform: translateX(18px);
+}
+
+.bottom-button-container {
+  padding: 20px;
+  margin-top: auto;
+}
+
+.clear-data-button {
+  background-color: #dc3545;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  width: 100%;
+  font-size: 1.1em;
+  transition: background-color 0.2s ease;
+}
+
+.clear-data-button:hover {
+  background-color: #c82333;
+}
