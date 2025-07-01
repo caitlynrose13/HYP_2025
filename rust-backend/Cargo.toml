@@ -32,3 +32,5 @@ p256 = { version = "0.13", features = ["ecdh"] }
 
 #certificate parsing
 x509-parser = "0.15"
+
+hex = "0.4"

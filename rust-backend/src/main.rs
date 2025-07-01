@@ -1,6 +1,5 @@
 use axum::Router; // web framework for routoing and request handling
 use tokio::net::TcpListener; //TCP listener
-use tower_http::cors::{Any, CorsLayer}; //configure CORS policies
 use tracing::{Level, info};
 
 use rust_backend::routes;
@@ -12,10 +11,6 @@ async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     // allow all origins and headers for now - NEED TO CHANGE LATER
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_headers(Any)
-        .allow_methods(Any);
 
     // Build Axum app
     let app = Router::new().nest("/", routes::assessment_routes::router());
