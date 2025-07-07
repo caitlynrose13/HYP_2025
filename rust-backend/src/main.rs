@@ -13,7 +13,7 @@ async fn main() {
     // allow all origins and headers for now - NEED TO CHANGE LATER
 
     // Build Axum app
-    let app = Router::new().nest("/", routes::assessment_routes::router());
+    //let app = Router::new().nest("/", routes::assessment_routes::router());
 
     //tcp listener at port 8080
     let listener = TcpListener::bind("127.0.0.1:8080")
@@ -22,5 +22,5 @@ async fn main() {
 
     info!("Server listening on http://127.0.0.1:8080");
 
-    axum::serve(listener, app).await.expect("Server error");
+    //axum::serve(listener, app).await.expect("Server error");
 }
