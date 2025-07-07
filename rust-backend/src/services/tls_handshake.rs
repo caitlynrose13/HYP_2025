@@ -1,27 +1,27 @@
 // src/services/tls_handshake.rs
 
-use std::io::{Cursor, Read, Write}; // <-- FIXED: Removed `self`
+use std::io::{Cursor, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use hex;
 use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::{
+    EncodedPoint,
+    ecdsa::{Signature, VerifyingKey, signature::Verifier},
+};
 use rand::{Rng, thread_rng};
+use sha2::{Digest, Sha256};
+use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 
+use super::certificate_validator;
 use super::errors::TlsError;
 use super::tls_parser::{
-    HandshakeMessageType,
-    ServerHelloParsed,
-    // TLS_ALERT, // <-- FIXED: Removed unused import
-    TLS_CHANGE_CIPHER_SPEC,
-    TLS_HANDSHAKE,
-    TlsContentType,
-    parse_certificate_list,
-    parse_handshake_messages,
-    parse_server_hello_content,
-    parse_server_key_exchange_content,
-    parse_tls_record,
+    HandshakeMessageType, ServerHelloParsed, ServerKeyExchangeParsed, TLS_CHANGE_CIPHER_SPEC,
+    TLS_HANDSHAKE, TlsContentType, parse_certificate_list, parse_handshake_messages,
+    parse_server_hello_content, parse_server_key_exchange_content, parse_tls_record,
 };
 
 // --- TlsVersion Enum ---
@@ -40,7 +40,6 @@ impl From<TlsVersion> for (u8, u8) {
     }
 }
 
-// --- build_client_hello_with_random_and_key_share Function ---
 pub fn build_client_hello_with_random_and_key_share(
     domain: &str,
     tls_version: TlsVersion,
@@ -49,10 +48,8 @@ pub fn build_client_hello_with_random_and_key_share(
 ) -> Result<Vec<u8>, TlsError> {
     let mut client_hello = Vec::new();
 
-    // 1. Handshake Type (ClientHello)
-    client_hello.push(0x01); // Handshake Type: Client Hello (1 byte)
+    client_hello.push(0x01);
 
-    // Placeholder for Handshake Message Length (3 bytes - filled later)
     let handshake_length_placeholder = client_hello.len();
     client_hello.extend_from_slice(&[0, 0, 0]);
 
@@ -86,11 +83,9 @@ pub fn build_client_hello_with_random_and_key_share(
     client_hello.push((cipher_suites.len() / 2) as u8 * 2);
     client_hello.extend_from_slice(&cipher_suites);
 
-    // 6. Compression Methods (1 byte length + list of 1-byte compression IDs)
     client_hello.push(0x01);
     client_hello.push(0x00);
 
-    // 7. Extensions (2 bytes length + list of extensions)
     let extensions_start_index = client_hello.len();
     client_hello.extend_from_slice(&[0, 0]);
 
@@ -182,7 +177,6 @@ pub fn build_client_hello_with_random_and_key_share(
     Ok(tls_record)
 }
 
-// --- Dummy Functions ---
 pub fn derive_session_keys(
     _pre_master_secret: &[u8],
     _client_random: &[u8; 32],
@@ -207,6 +201,64 @@ pub fn encrypt_handshake_message(
         0x17, 0x03, 0x03, 0x00, 0x10, 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD,
         0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00,
     ])
+}
+
+pub fn verify_server_key_exchange_signature(
+    ske: &ServerKeyExchangeParsed,
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+    cert_chain: &[Vec<u8>],
+) -> Result<(), TlsError> {
+    println!("   Attempting to verify ServerKeyExchange signature...");
+
+    let cert_der = cert_chain
+        .get(0)
+        .ok_or_else(|| TlsError::CertificateError("No server certificate provided.".into()))?;
+
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| TlsError::CertificateError(format!("Failed to parse server cert: {:?}", e)))?;
+
+    let spki_bytes = cert.tbs_certificate.subject_pki.subject_public_key.data;
+
+    let pub_key_point = EncodedPoint::from_bytes(spki_bytes)
+        .map_err(|_| TlsError::CertificateError("Invalid SPKI EC point format.".into()))?;
+
+    let verifying_key = VerifyingKey::from_encoded_point(&pub_key_point)
+        .map_err(|e| TlsError::CertificateError(format!("Invalid EC public key: {:?}", e)))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(client_random);
+    hasher.update(server_random);
+    hasher.update(&[ske.curve_type]);
+    hasher.update(&(ske.named_curve as u16).to_be_bytes());
+    hasher.update(&[ske.public_key.len() as u8]);
+    hasher.update(&ske.public_key);
+    let message_hash = hasher.finalize();
+
+    if ske.signature_algorithm != [0x04, 0x03] {
+        return Err(TlsError::HandshakeFailed(format!(
+            "Unsupported signature algorithm: 0x{:02X}{:02X}, expected ECDSA_P256_SHA256 (0x0403)",
+            ske.signature_algorithm[0], ske.signature_algorithm[1]
+        )));
+    }
+
+    if ske.signature.len() != 64 {
+        return Err(TlsError::HandshakeFailed(
+            "Signature must be exactly 64 bytes (ECDSA P-256)".into(),
+        ));
+    }
+
+    let signature = Signature::from_slice(&ske.signature)
+        .map_err(|e| TlsError::HandshakeFailed(format!("Invalid signature format: {:?}", e)))?;
+
+    verifying_key
+        .verify(message_hash.as_slice(), &signature)
+        .map_err(|e| {
+            TlsError::HandshakeFailed(format!("Signature verification failed: {:?}", e))
+        })?;
+
+    println!("   ServerKeyExchange signature successfully verified!");
+    Ok(())
 }
 
 // --- perform_tls_handshake_full Function ---
@@ -279,8 +331,8 @@ pub fn perform_tls_handshake_full(
         "Attempting to parse server response of {} bytes.",
         server_response_buffer.len()
     );
-    let (server_hello_parsed, certificates, server_key_exchange_payload) =
-        handle_server_hello_flight(&server_response_buffer, tls_version)?;
+    let (server_hello_parsed, certificates, server_key_exchange_parsed) =
+        handle_server_hello_flight(&server_response_buffer, tls_version)?; //call helper function
 
     println!("\n--- Parsed Server Hello Flight ---");
     println!(
@@ -305,13 +357,43 @@ pub fn perform_tls_handshake_full(
     for (i, cert_der) in certificates.iter().enumerate() {
         println!("  Certificate {}: {} bytes (DER)", i + 1, cert_der.len());
     }
-    if let Some(ske_payload) = &server_key_exchange_payload {
-        println!("Server Key Exchange Payload: {} bytes", ske_payload.len());
+    if let Some(ske_payload) = &server_key_exchange_parsed {
+        println!(
+            "Server Key Exchange Payload: {} bytes",
+            ske_payload.public_key.len()
+        );
     }
     println!("----------------------------------");
 
-    // --- Placeholder for Phase 2: Certificate Validation ---
-    println!("\n--- Placeholder: Performing Certificate Validation (Phase 2) ---");
+    // ---  Certificate Validation ---
+    // --- PHASE 2: Certificate Validation & Hostname Verification (Step 1) ---
+    println!("\n--- Phase 2: Performing Certificate Validation & Hostname Verification ---");
+    // This is where the call to your certificate_validator goes:
+    certificate_validator::validate_server_certificate(&certificates, domain)?;
+    println!("Server certificate chain and hostname validated successfully!");
+
+    // --- Phase 2.5: ServerKeyExchange Signature Verification (Step 2) ---
+    // This section is what replaces your old "Placeholder: Processing Server Key Exchange (TLS 1.2)"
+    if tls_version == TlsVersion::Tls12 {
+        if let Some(ske_parsed) = &server_key_exchange_parsed {
+            // Use the `ske_parsed` from handle_server_hello_flight
+            println!("--- Phase 2.5: Verifying ServerKeyExchange Signature ---");
+            verify_server_key_exchange_signature(
+                // Call your new verification function
+                ske_parsed,
+                &client_random, // You need to have `client_random` available in this scope
+                &server_hello_parsed.server_random,
+                &certificates, // Pass certificates to extract server's public key
+            )?;
+            println!("ServerKeyExchange signature verified successfully!");
+        } else {
+            println!(
+                "No ServerKeyExchange message received (might be using RSA key exchange, or TLS 1.3)."
+            );
+        }
+    } else if tls_version == TlsVersion::Tls13 {
+        println!("TLS 1.3 negotiated, ServerKeyExchange is not used.");
+    }
 
     // --- Placeholder for Phase 3: Key Exchange and Key Derivation ---
     println!("--- Placeholder: Performing Key Exchange & Key Derivation (Phase 3) ---");
@@ -362,8 +444,6 @@ pub fn perform_tls_handshake_full(
     println!(
         "(Dummy) Received server's final handshake bytes. Need to parse ChangeCipherSpec and Finished."
     );
-
-    println!("\nTLS Handshake process completed (placeholders after Phase 1).");
     Ok(vec![])
 }
 
@@ -371,11 +451,18 @@ pub fn perform_tls_handshake_full(
 pub fn handle_server_hello_flight(
     response_bytes: &[u8],
     _tls_client_version: TlsVersion,
-) -> Result<(ServerHelloParsed, Vec<Vec<u8>>, Option<Vec<u8>>), TlsError> {
+) -> Result<
+    (
+        ServerHelloParsed,
+        Vec<Vec<u8>>,
+        Option<ServerKeyExchangeParsed>,
+    ),
+    TlsError,
+> {
     let mut cursor = Cursor::new(response_bytes);
     let mut server_hello_parsed: Option<ServerHelloParsed> = None;
     let mut certificates: Vec<Vec<u8>> = Vec::new();
-    let mut server_key_exchange_payload: Option<Vec<u8>> = None;
+    let mut server_key_exchange_parsed: Option<ServerKeyExchangeParsed> = None;
     let mut server_hello_done_received = false;
 
     println!("Processing server's initial flight records...");
@@ -440,12 +527,12 @@ pub fn handle_server_hello_flight(
                                 }
 
                                 HandshakeMessageType::ServerKeyExchange => {
-                                    if server_key_exchange_payload.is_some() {
+                                    if server_key_exchange_parsed.is_some() {
                                         return Err(TlsError::HandshakeFailed(
                                             "Received duplicate ServerKeyExchange".to_string(),
                                         ));
                                     }
-                                    server_key_exchange_payload = Some(
+                                    server_key_exchange_parsed = Some(
                                         parse_server_key_exchange_content(&msg.payload).map_err(
                                             |e| {
                                                 TlsError::HandshakeFailed(format!(
@@ -523,5 +610,5 @@ pub fn handle_server_hello_flight(
         ));
     };
 
-    Ok((sh, certificates, server_key_exchange_payload))
+    Ok((sh, certificates, server_key_exchange_parsed))
 }

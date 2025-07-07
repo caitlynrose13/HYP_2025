@@ -1,5 +1,8 @@
-//meant to read the server's handshake messages
-use std::io::{Cursor, Read};
+// src/services/tls_parser.rs
+
+// Corrected imports for byteorder traits and types
+use byteorder::{BigEndian, ReadBytesExt}; // ReadBytesExt for read_u8, read_u16, read_u24
+use std::io::{Cursor, Read}; // Read trait for read_exact
 
 // contants for TLS record types
 pub const TLS_HANDSHAKE: u8 = 0x16;
@@ -30,7 +33,6 @@ pub enum TlsParserError {
     MalformedServerKeyExchange,
     InvalidSignatureScheme(u16),
     InvalidNamedGroup(u16),
-    // ... add any other error variants you have in your actual code
     GenericError(String),
 }
 
@@ -144,6 +146,15 @@ pub struct ServerHelloParsed {
     pub server_key_share_public: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ServerKeyExchangeParsed {
+    pub curve_type: u8,
+    pub named_curve: u16,
+    pub public_key: Vec<u8>,
+    pub signature_algorithm: [u8; 2],
+    pub signature: Vec<u8>,
+}
+
 // -- functions --
 pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>, TlsParserError> {
     let current_pos = reader.position() as usize;
@@ -153,21 +164,29 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
         return Ok(None);
     }
 
-    let mut header_buf = [0u8; 5];
-    reader.read_exact(&mut header_buf)?;
-
-    let content_type_byte = header_buf[0];
-    let version_major = header_buf[1];
-    let version_minor = header_buf[2];
-    let length = u16::from_be_bytes([header_buf[3], header_buf[4]]);
+    // Using ReadBytesExt methods
+    let content_type_byte = reader
+        .read_u8()
+        .map_err(|e| TlsParserError::GenericError(format!("Failed to read content type: {}", e)))?;
+    let version_major = reader.read_u8().map_err(|e| {
+        TlsParserError::GenericError(format!("Failed to read version major: {}", e))
+    })?;
+    let version_minor = reader.read_u8().map_err(|e| {
+        TlsParserError::GenericError(format!("Failed to read version minor: {}", e))
+    })?;
+    let length = reader
+        .read_u16::<BigEndian>()
+        .map_err(|e| TlsParserError::GenericError(format!("Failed to read length: {}", e)))?;
 
     if remaining_len < 5 + length as usize {
         reader.set_position(current_pos as u64);
-        return Ok(None);
+        return Ok(None); // Return Ok(None) to indicate more data is needed, not an error
     }
 
     let mut payload = vec![0u8; length as usize];
-    reader.read_exact(&mut payload)?;
+    reader
+        .read_exact(&mut payload)
+        .map_err(|e| TlsParserError::GenericError(format!("Failed to read payload: {}", e)))?;
 
     Ok(Some(TlsRecord {
         content_type: content_type_byte.into(),
@@ -181,16 +200,25 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
 pub fn parse_handshake_messages(
     payload: &[u8],
 ) -> Result<Vec<TlsHandshakeMessage>, TlsParserError> {
+    let mut cursor = Cursor::new(payload);
     let mut messages = Vec::new();
-    let mut offset = 0;
 
-    while offset + 4 <= payload.len() {
-        let msg_type_byte = payload[offset];
-        let msg_len = ((payload[offset + 1] as u32) << 16)
-            | ((payload[offset + 2] as u32) << 8)
-            | (payload[offset + 3] as u32);
+    while (cursor.position() as usize) < payload.len() {
+        let msg_type_byte = cursor.read_u8().map_err(|e| {
+            TlsParserError::MalformedMessage(format!(
+                "Failed to read handshake message type: {}",
+                e
+            ))
+        })?;
+        // Use read_u24 from byteorder
+        let msg_len = cursor.read_u24::<BigEndian>().map_err(|e| {
+            TlsParserError::MalformedMessage(format!(
+                "Failed to read handshake message length: {}",
+                e
+            ))
+        })?;
 
-        let body_start = offset + 4;
+        let body_start = cursor.position() as usize; // Current position after reading header
         let body_end = body_start + msg_len as usize;
 
         if body_end > payload.len() {
@@ -198,86 +226,112 @@ pub fn parse_handshake_messages(
                 "Handshake message length ({}) exceeds record payload size ({}). Offset: {}",
                 msg_len,
                 payload.len(),
-                offset
+                body_start
             )));
         }
 
-        let msg_payload = payload[body_start..body_end].to_vec();
+        let mut msg_payload = vec![0; msg_len as usize];
+        cursor.read_exact(&mut msg_payload).map_err(|e| {
+            TlsParserError::MalformedMessage(format!(
+                "Failed to read handshake message payload: {}",
+                e
+            ))
+        })?;
 
         messages.push(TlsHandshakeMessage {
             msg_type: msg_type_byte.into(),
             payload: msg_payload,
         });
-
-        offset = body_end;
     }
     Ok(messages)
 }
 
 pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, TlsParserError> {
+    let mut cursor = Cursor::new(payload);
+
     if payload.len() < 38 {
-        return Err(TlsParserError::MalformedMessage(
-            "ServerHello payload too short.".to_string(),
-        ));
+        // Minimum length for version, random, session ID length (0), cipher suite, compression
+        return Err(TlsParserError::MalformedServerHello);
     }
 
-    let negotiated_tls_version = (payload[0], payload[1]);
+    let negotiated_tls_version = (
+        cursor
+            .read_u8()
+            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
+        cursor
+            .read_u8()
+            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
+    );
     let mut server_random_bytes = [0u8; 32];
-    server_random_bytes.copy_from_slice(&payload[2..34]);
+    cursor
+        .read_exact(&mut server_random_bytes)
+        .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?;
 
-    let session_id_len = payload[34] as usize;
-    let mut current_offset = 35 + session_id_len;
+    let session_id_len = cursor
+        .read_u8()
+        .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?
+        as usize;
+    // Skip session ID bytes if present
+    cursor.set_position(cursor.position() + session_id_len as u64); // Move cursor past session ID
 
-    if current_offset + 2 > payload.len() {
-        return Err(TlsParserError::MalformedMessage(
-            "ServerHello payload too short for cipher suite.".to_string(),
-        ));
+    if cursor.position() as usize + 3 > payload.len() {
+        // 2 bytes for cipher suite, 1 for compression
+        return Err(TlsParserError::MalformedServerHello);
     }
-    let chosen_cipher_suite = [payload[current_offset], payload[current_offset + 1]];
-    current_offset += 2;
-
-    if current_offset + 1 > payload.len() {
-        return Err(TlsParserError::MalformedMessage(
-            "ServerHello payload too short for compression method.".to_string(),
-        ));
-    }
-    current_offset += 1;
+    let chosen_cipher_suite = [
+        cursor
+            .read_u8()
+            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
+        cursor
+            .read_u8()
+            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
+    ];
+    let _chosen_compression_method = cursor
+        .read_u8()
+        .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?;
 
     let mut server_key_share_public: Option<Vec<u8>> = None;
-    // Check if there are extensions
-    if current_offset + 2 <= payload.len() {
-        let extensions_len =
-            u16::from_be_bytes([payload[current_offset], payload[current_offset + 1]]) as usize;
-        current_offset += 2;
 
-        if current_offset + extensions_len > payload.len() {
+    // Check if there are extensions
+    if (cursor.position() as usize) < payload.len() {
+        let extensions_len = cursor
+            .read_u16::<BigEndian>()
+            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?
+            as usize;
+        let extensions_start_pos = cursor.position() as usize;
+
+        if extensions_start_pos + extensions_len > payload.len() {
             return Err(TlsParserError::MalformedMessage(
                 "ServerHello extensions length mismatch.".to_string(),
             ));
         }
 
-        let mut ext_offset = 0;
-        let extensions_data = &payload[current_offset..current_offset + extensions_len];
+        let extensions_data_end = extensions_start_pos + extensions_len;
+        let mut ext_cursor = Cursor::new(&payload[extensions_start_pos..extensions_data_end]);
 
-        while ext_offset + 4 <= extensions_data.len() {
-            let ext_type =
-                u16::from_be_bytes([extensions_data[ext_offset], extensions_data[ext_offset + 1]]);
-            let ext_len = u16::from_be_bytes([
-                extensions_data[ext_offset + 2],
-                extensions_data[ext_offset + 3],
-            ]) as usize;
-            ext_offset += 4;
+        while (ext_cursor.position() as usize) + 4 <= ext_cursor.get_ref().len() {
+            let ext_type = ext_cursor
+                .read_u16::<BigEndian>()
+                .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?;
+            let ext_len = ext_cursor
+                .read_u16::<BigEndian>()
+                .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?
+                as usize;
 
-            if ext_offset + ext_len > extensions_data.len() {
+            if (ext_cursor.position() as usize) + ext_len > ext_cursor.get_ref().len() {
                 return Err(TlsParserError::MalformedMessage(
                     "ServerHello extension data length mismatch.".to_string(),
                 ));
             }
 
-            let ext_content = &extensions_data[ext_offset..ext_offset + ext_len];
+            let ext_content_start = ext_cursor.position() as usize;
+            let ext_content_end = ext_content_start + ext_len;
+            let ext_content = &ext_cursor.get_ref()[ext_content_start..ext_content_end];
 
+            // Handle key_share extension for TLS 1.3
+            // Note: This is specifically for TLS 1.3's key_share.
+            // TLS 1.2 would use ServerKeyExchange message for ephemeral keys.
             if negotiated_tls_version.0 == 0x03 && negotiated_tls_version.1 == 0x04 {
-                // TLS 1.3
                 if ext_type == 0x0033 {
                     // key_share extension
                     if ext_content.len() < 4 {
@@ -297,6 +351,7 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
                     }
 
                     if group_id == 0x0017 || group_id == 0x001D {
+                        // secp256r1 or x25519
                         server_key_share_public =
                             Some(ext_content[4..4 + key_exchange_len].to_vec());
                     } else {
@@ -308,8 +363,9 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
                 }
             }
 
-            ext_offset += ext_len;
+            ext_cursor.set_position(ext_content_end as u64); // Move cursor past this extension's content
         }
+        cursor.set_position(extensions_data_end as u64); // Move main cursor past all extensions
     }
 
     Ok(ServerHelloParsed {
@@ -322,69 +378,145 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
 
 // --- Helper function for certificate list parsing (for Certificate message payload) ---
 pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserError> {
-    let mut certificates = Vec::new();
-    let mut offset = 0;
+    let mut cursor = Cursor::new(payload);
 
     if payload.len() < 3 {
-        return Err(TlsParserError::MalformedMessage(
-            "Certificate message payload too short for list length".to_string(),
-        ));
+        return Err(TlsParserError::MalformedCertificateList);
     }
 
-    let total_certs_len =
-        ((payload[0] as usize) << 16) | ((payload[1] as usize) << 8) | (payload[2] as usize);
-    offset += 3;
+    // Read total length of certificate list (3 bytes)
+    let total_certs_len = cursor.read_u24::<BigEndian>().map_err(|e| {
+        TlsParserError::MalformedMessage(format!("Failed to read certificate list length: {}", e))
+    })? as usize;
 
-    if total_certs_len > payload.len() - 3 {
+    // The total_certs_len should match the remaining payload length
+    // after reading the 3-byte length field.
+    if total_certs_len != payload.len() - (cursor.position() as usize) {
         return Err(TlsParserError::MalformedMessage(format!(
-            "Certificate list declared length ({}) exceeds actual message payload ({} remaining)",
+            "Certificate list declared length ({}) does not match actual remaining payload ({}).",
             total_certs_len,
-            payload.len() - 3
+            payload.len() - (cursor.position() as usize)
         )));
     }
 
-    while offset + 3 <= payload.len() {
-        let cert_len = ((payload[offset] as usize) << 16)
-            | ((payload[offset + 1] as usize) << 8)
-            | (payload[offset + 2] as usize);
-        offset += 3;
+    let mut certificates = Vec::new();
+    while (cursor.position() as usize) < payload.len() {
+        if (cursor.position() as usize) + 3 > payload.len() {
+            return Err(TlsParserError::MalformedCertificateList); // Not enough bytes for next cert length
+        }
+        // Read individual certificate length (3 bytes)
+        let cert_len = cursor.read_u24::<BigEndian>().map_err(|e| {
+            TlsParserError::MalformedMessage(format!("Failed to read certificate length: {}", e))
+        })? as usize;
 
-        if offset + cert_len > payload.len() {
+        if (cursor.position() as usize) + cert_len > payload.len() {
             return Err(TlsParserError::MalformedMessage(format!(
-                "Individual certificate length ({}) exceeds list bounds. Offset: {}, Remaining payload: {}",
+                "Individual certificate length ({}) exceeds list bounds. Remaining payload: {}",
                 cert_len,
-                offset,
-                payload.len() - offset
+                payload.len() - (cursor.position() as usize)
             )));
         }
 
-        certificates.push(payload[offset..offset + cert_len].to_vec());
-        offset += cert_len;
+        let mut cert_bytes = vec![0; cert_len];
+        cursor.read_exact(&mut cert_bytes).map_err(|e| {
+            TlsParserError::MalformedMessage(format!("Failed to read certificate bytes: {}", e))
+        })?;
+        certificates.push(cert_bytes);
     }
 
-    // After parsing all certs, the offset should match the total_certs_len + 3
-    if offset != total_certs_len + 3 {
-        return Err(TlsParserError::MalformedMessage(format!(
-            "Mismatched certificate list length. Parsed: {}, Declared: {}",
-            offset - 3,
-            total_certs_len
-        )));
+    // After parsing all certs, the cursor should be at the end of the payload
+    if (cursor.position() as usize) != payload.len() {
+        return Err(TlsParserError::MalformedMessage(
+            "Trailing data found after certificate list parsing.".to_string(),
+        ));
     }
 
     Ok(certificates)
 }
 
-pub fn parse_server_key_exchange_content(payload: &[u8]) -> Result<Vec<u8>, TlsParserError> {
-    // later need to:
-    //Identify the group (e.g., Diffie-Hellman or ECDH parameters).
-    // Extract the server's ephemeral public key.
-    //  Extract the signature algorithm used.
-    // Extract the signature itself.
-    if payload.is_empty() {
-        Err(TlsParserError::MalformedMessage(
-            "ServerKeyExchange payload is empty".to_string(),
-        ))
-    } else {
-        Ok(payload.to_vec())
+pub fn parse_server_key_exchange_content(
+    payload: &[u8],
+) -> Result<ServerKeyExchangeParsed, TlsParserError> {
+    // Changed error type to TlsParserError
+    let mut cursor = Cursor::new(payload);
+
+    // 1. EC Curve Type (1 byte) - always 0x03 for named_curve
+    let curve_type = cursor
+        .read_u8()
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+    if curve_type != 0x03 {
+        return Err(TlsParserError::InvalidNamedGroup(curve_type as u16)); // More specific error
+    }
+
+    // 2. Named Curve (2 bytes) - e.g., secp256r1 (0x0017)
+    let named_curve = cursor
+        .read_u16::<BigEndian>()
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+
+    // 3. Public Key Length (1 byte)
+    let public_key_len = cursor
+        .read_u8()
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?
+        as usize;
+
+    // 4. Public Key (variable length)
+    let mut public_key_bytes = vec![0; public_key_len];
+    cursor
+        .read_exact(&mut public_key_bytes)
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+
+    // 5. Signature Algorithm (2 bytes)
+    let mut signature_algorithm = [0; 2];
+    cursor
+        .read_exact(&mut signature_algorithm)
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+
+    // 6. Signature Length (2 bytes)
+    let signature_len = cursor
+        .read_u16::<BigEndian>()
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?
+        as usize;
+
+    // 7. Signature (variable length)
+    let mut signature_bytes = vec![0; signature_len];
+    cursor
+        .read_exact(&mut signature_bytes)
+        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+
+    if cursor.position() as usize != payload.len() {
+        return Err(TlsParserError::MalformedMessage(
+            "ServerKeyExchange payload has unread trailing data".to_string(),
+        ));
+    }
+
+    Ok(ServerKeyExchangeParsed {
+        curve_type,
+        named_curve,
+        public_key: public_key_bytes,
+        signature_algorithm,
+        signature: signature_bytes, // FIXED: Matches struct definition (Vec<u8>)
+    })
+}
+
+// Helper trait to convert std::io::Error to TlsParserError::GenericError
+trait IntoGenericError<T> {
+    fn into_generic(self, context: T) -> TlsParserError;
+}
+
+impl<E: std::fmt::Display> IntoGenericError<E> for TlsParserError {
+    fn into_generic(self, context: E) -> TlsParserError {
+        match self {
+            TlsParserError::MalformedServerHello => TlsParserError::MalformedMessage(format!(
+                "Malformed ServerHello message: {}",
+                context
+            )),
+            TlsParserError::MalformedServerKeyExchange => TlsParserError::MalformedMessage(
+                format!("Malformed ServerKeyExchange message: {}", context),
+            ),
+            TlsParserError::MalformedCertificateList => {
+                TlsParserError::MalformedMessage(format!("Malformed Certificate list: {}", context))
+            }
+            _ => TlsParserError::GenericError(format!("Parser error: {}", context)),
+        }
     }
 }
