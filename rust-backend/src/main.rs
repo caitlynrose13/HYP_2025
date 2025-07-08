@@ -1,8 +1,5 @@
-use axum::Router; // web framework for routoing and request handling
 use tokio::net::TcpListener; //TCP listener
 use tracing::{Level, info};
-
-use rust_backend::routes;
 
 #[tokio::main] // the program entry point using the Tokio async runtime.
 async fn main() {

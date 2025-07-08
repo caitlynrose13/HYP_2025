@@ -1,15 +1,16 @@
 // src/services/tls_handshake.rs
-
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use hex;
-use p256::ecdh::EphemeralSecret;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use hmac::{Hmac, Mac};
 use p256::{
     EncodedPoint,
+    ecdh::EphemeralSecret,
     ecdsa::{Signature, VerifyingKey, signature::Verifier},
+    elliptic_curve::sec1::FromEncodedPoint,
+    elliptic_curve::sec1::ToEncodedPoint,
 };
 use rand::{Rng, thread_rng};
 use sha2::{Digest, Sha256};
@@ -19,12 +20,13 @@ use x509_parser::prelude::FromDer;
 use super::certificate_validator;
 use super::errors::TlsError;
 use super::tls_parser::{
-    HandshakeMessageType, ServerHelloParsed, ServerKeyExchangeParsed, TLS_CHANGE_CIPHER_SPEC,
-    TLS_HANDSHAKE, TlsContentType, parse_certificate_list, parse_handshake_messages,
-    parse_server_hello_content, parse_server_key_exchange_content, parse_tls_record,
+    CipherSuite, HandshakeMessageType, ServerHelloParsed, ServerKeyExchangeParsed,
+    TLS_CHANGE_CIPHER_SPEC, TLS_HANDSHAKE, TlsContentType, parse_certificate_list,
+    parse_handshake_messages, parse_server_hello_content, parse_server_key_exchange_content,
+    parse_tls_record,
 };
+use aes_gcm::{AeadInPlace, Aes128Gcm, KeyInit, Nonce};
 
-// --- TlsVersion Enum ---
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TlsVersion {
     Tls12, // 0x0303
@@ -40,6 +42,115 @@ impl From<TlsVersion> for (u8, u8) {
     }
 }
 
+pub struct TlsConnectionState {
+    pub master_secret: Vec<u8>,
+    pub client_write_key: Vec<u8>,
+    pub server_write_key: Vec<u8>,
+    pub client_fixed_iv: Vec<u8>,
+    pub server_fixed_iv: Vec<u8>,
+    pub client_sequence_number: u64,
+    pub server_sequence_number: u64,
+    pub negotiated_cipher_suite: CipherSuite,
+    pub negotiated_tls_version: TlsVersion,
+    pub client_random: [u8; 32],
+    pub server_random: [u8; 32],
+    pub handshake_hasher: Sha256,
+}
+
+fn prf_tls12(secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Result<Vec<u8>, TlsError> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut result = Vec::with_capacity(len);
+    let mut a_n = Vec::new();
+
+    // A(0) = label + seed
+    a_n.extend_from_slice(label);
+    a_n.extend_from_slice(seed);
+
+    // Calculate A(1) = HMAC_hash(secret, A(0))
+    let mut hmac_a = <HmacSha256 as KeyInit>::new_from_slice(secret).map_err(|_| {
+        // FIX HERE
+        TlsError::KeyDerivationError("Invalid HMAC secret length for PRF A(1)".to_string())
+    })?;
+    hmac_a.update(&a_n);
+    let a1_output = hmac_a.finalize().into_bytes().to_vec();
+    a_n = a1_output; // Update A(n) for next iteration
+
+    // Loop to generate enough output
+    while result.len() < len {
+        let mut hmac_p = <HmacSha256 as KeyInit>::new_from_slice(secret).map_err(|_| {
+            // FIX HERE
+            TlsError::KeyDerivationError("Invalid HMAC secret length for PRF P_hash".to_string())
+        })?;
+        hmac_p.update(&a_n); // Use the current A(n)
+        let p_output = hmac_p.finalize().into_bytes().to_vec();
+
+        result.extend_from_slice(&p_output);
+
+        if result.len() < len {
+            // Calculate A(n+1) = HMAC_hash(secret, A(n)) for the next iteration
+            let mut hmac_a_next =
+                <HmacSha256 as KeyInit>::new_from_slice(secret).map_err(|_| {
+                    // FIX HERE
+                    TlsError::KeyDerivationError(
+                        "Invalid HMAC secret length for PRF A(i+1)".to_string(),
+                    )
+                })?;
+            hmac_a_next.update(&a_n);
+            a_n = hmac_a_next.finalize().into_bytes().to_vec();
+        }
+    }
+
+    result.truncate(len); // Truncate to the exact desired length
+    Ok(result)
+}
+
+pub fn derive_master_secret(
+    pre_master_secret: &[u8],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+    tls_version: TlsVersion, // Used to select PRF version
+) -> Result<Vec<u8>, TlsError> {
+    if tls_version != TlsVersion::Tls12 {
+        return Err(TlsError::KeyDerivationError(
+            "Only TLS 1.2 Master Secret derivation supported for now.".to_string(),
+        ));
+    }
+
+    let mut seed = Vec::new();
+    seed.extend_from_slice(client_random);
+    seed.extend_from_slice(server_random);
+
+    // Master Secret = PRF(Pre-Master Secret, "master secret", ClientHello.random + ServerHello.random)
+    prf_tls12(pre_master_secret, b"master secret", &seed, 48) // Master Secret is always 48 bytes
+}
+
+pub fn derive_key_block(
+    master_secret: &[u8],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+    chosen_cipher_suite: &CipherSuite, // Directly use CipherSuite as imported
+    tls_version: TlsVersion,
+) -> Result<Vec<u8>, TlsError> {
+    if tls_version != TlsVersion::Tls12 {
+        return Err(TlsError::KeyDerivationError(
+            "Only TLS 1.2 Key Block derivation supported for now.".to_string(),
+        ));
+    }
+
+    let mut seed = Vec::new();
+    seed.extend_from_slice(server_random);
+    seed.extend_from_slice(client_random);
+
+    let key_len = chosen_cipher_suite.key_length as usize;
+    let fixed_iv_len = chosen_cipher_suite.fixed_iv_length as usize;
+    let mac_key_len = chosen_cipher_suite.mac_key_length as usize;
+
+    let key_block_len = (mac_key_len * 2) + (key_len * 2) + (fixed_iv_len * 2);
+
+    prf_tls12(master_secret, b"key expansion", &seed, key_block_len)
+}
+
 pub fn build_client_hello_with_random_and_key_share(
     domain: &str,
     tls_version: TlsVersion,
@@ -53,18 +164,18 @@ pub fn build_client_hello_with_random_and_key_share(
     let handshake_length_placeholder = client_hello.len();
     client_hello.extend_from_slice(&[0, 0, 0]);
 
-    // 2. TLS Version (e.g., TLS 1.2 is 0x0303, TLS 1.3 is 0x0304)
+    // TLS Version (e.g., TLS 1.2 is 0x0303, TLS 1.3 is 0x0304)
     let (major, minor) = tls_version.into();
     client_hello.push(major);
     client_hello.push(minor);
 
-    // 3. Client Random (32 bytes)
+    // Client Random (32 bytes)
     client_hello.extend_from_slice(client_random);
 
-    // 4. Session ID (1 byte length + Session ID bytes)
+    // Session ID (1 byte length + Session ID bytes)
     client_hello.push(0x00); // Session ID length (0 for empty)
 
-    // 5. Cipher Suites (2 bytes length + list of 2-byte cipher suite IDs)
+    // Cipher Suites (2 bytes length + list of 2-byte cipher suite IDs)
     let cipher_suites: Vec<u8> = match tls_version {
         TlsVersion::Tls12 => {
             vec![
@@ -90,7 +201,6 @@ pub fn build_client_hello_with_random_and_key_share(
     client_hello.extend_from_slice(&[0, 0]);
 
     // --- Add Extensions ---
-    // Supported Versions (for TLS 1.3 negotiation)
     if tls_version == TlsVersion::Tls13 {
         client_hello.extend_from_slice(&[0x00, 0x2B]); // Extension Type: supported_versions
         client_hello.extend_from_slice(&[0x00, 0x03]); // Extension Length
@@ -191,16 +301,76 @@ pub fn build_change_cipher_spec() -> Vec<u8> {
     vec![TLS_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01]
 }
 
-pub fn encrypt_handshake_message(
-    _payload: &[u8],
-    _key: &[u8],
-    _iv: &[u8],
-    _tls_version: TlsVersion,
+// A proper implementation for TLS_ECDHE_..._AES_128_GCM_SHA256
+// A proper implementation for TLS_ECDHE_..._AES_128_GCM_SHA256
+pub fn encrypt_gcm_message(
+    plaintext: &[u8],
+    key: &[u8],
+    fixed_iv: &[u8],   // The 4-byte part from the key block
+    sequence_num: u64, // The record sequence number (starts at 0 for this message)
+    content_type: u8,
+    tls_version: TlsVersion,
 ) -> Result<Vec<u8>, TlsError> {
-    Ok(vec![
-        0x17, 0x03, 0x03, 0x00, 0x10, 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD,
-        0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00,
-    ])
+    // Key must be exactly 16 bytes for AES-128
+    if key.len() != 16 {
+        return Err(TlsError::EncryptionError(format!(
+            "Invalid key length for AES128GCM: expected 16, got {}",
+            key.len()
+        )));
+    }
+    // Fixed IV must be exactly 4 bytes for TLS 1.2 GCM
+    if fixed_iv.len() != 4 {
+        return Err(TlsError::EncryptionError(format!(
+            "Invalid fixed_iv length for TLS 1.2 GCM: expected 4, got {}",
+            fixed_iv.len()
+        )));
+    }
+
+    let cipher = Aes128Gcm::new_from_slice(key)
+        .map_err(|e| TlsError::EncryptionError(format!("Failed to create cipher: {}", e)))?;
+
+    // Construct the 12-byte nonce: 4-byte fixed IV + 8-byte explicit nonce (sequence number)
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[..4].copy_from_slice(fixed_iv);
+    // The explicit nonce in TLS 1.2 GCM is typically the 8-byte sequence number.
+    // Ensure `sequence_num` is correctly converted to 8 bytes.
+    nonce_bytes[4..].copy_from_slice(&sequence_num.to_be_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // Construct the Additional Associated Data (AAD) for TLS 1.2
+    // AAD = sequence_number(8) + content_type(1) + version(2) + length(2) = 13 bytes
+    let (major, minor) = tls_version.into(); // Assuming TlsVersion has an `into()` or `to_u8_pair()` method
+    let mut aad = Vec::with_capacity(13);
+    aad.extend_from_slice(&sequence_num.to_be_bytes()); // Opaque sequence number
+    aad.push(content_type); // Record content type
+    aad.push(major); // TLS version major
+    aad.push(minor); // TLS version minor
+    aad.extend_from_slice(&(plaintext.len() as u16).to_be_bytes()); // Plaintext length
+
+    // The buffer for encrypt_in_place should contain [explicit_nonce (8 bytes) | plaintext]
+    // The GCM tag (16 bytes) will be appended to this buffer by the encryption function.
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(&sequence_num.to_be_bytes()); // explicit_nonce part of the *encrypted payload*
+    buffer.extend_from_slice(plaintext); // The actual content to encrypt
+
+    println!(
+        "GCM Encryption: Plaintext len={}, AAD len={}, Nonce = {:x?}",
+        plaintext.len(),
+        aad.len(),
+        nonce
+    );
+    println!(
+        "GCM Encryption: Key = {:x?}, Fixed IV = {:x?}, Sequence Num = {}",
+        key, fixed_iv, sequence_num
+    );
+
+    cipher
+        .encrypt_in_place(nonce, &aad, &mut buffer)
+        .map_err(|e| TlsError::EncryptionError(format!("GCM encryption failed: {:?}", e)))?; // Use {:?} for Display/Debug for AEAD errors
+
+    // The buffer now contains [explicit_nonce (8 bytes) | ciphertext | GCM tag (16 bytes)]
+    // This entire `buffer` will be the payload of the TLS record.
+    Ok(buffer)
 }
 
 pub fn verify_server_key_exchange_signature(
@@ -209,7 +379,7 @@ pub fn verify_server_key_exchange_signature(
     server_random: &[u8; 32],
     cert_chain: &[Vec<u8>],
 ) -> Result<(), TlsError> {
-    println!("   Attempting to verify ServerKeyExchange signature...");
+    println!("    Attempting to verify ServerKeyExchange signature...");
 
     let cert_der = cert_chain
         .get(0)
@@ -223,10 +393,11 @@ pub fn verify_server_key_exchange_signature(
     let pub_key_point = EncodedPoint::from_bytes(spki_bytes)
         .map_err(|_| TlsError::CertificateError("Invalid SPKI EC point format.".into()))?;
 
-    let verifying_key = VerifyingKey::from_encoded_point(&pub_key_point)
-        .map_err(|e| TlsError::CertificateError(format!("Invalid EC public key: {:?}", e)))?;
+    let verifying_key = VerifyingKey::from_encoded_point(&pub_key_point).map_err(|e| {
+        TlsError::CertificateError(format!("Failed to create VerifyingKey from point: {:?}", e))
+    })?;
 
-    let mut hasher = Sha256::new();
+    let mut hasher = sha2::Sha256::new();
     hasher.update(client_random);
     hasher.update(server_random);
     hasher.update(&[ske.curve_type]);
@@ -234,7 +405,6 @@ pub fn verify_server_key_exchange_signature(
     hasher.update(&[ske.public_key.len() as u8]);
     hasher.update(&ske.public_key);
     let message_hash = hasher.finalize();
-
     if ske.signature_algorithm != [0x04, 0x03] {
         return Err(TlsError::HandshakeFailed(format!(
             "Unsupported signature algorithm: 0x{:02X}{:02X}, expected ECDSA_P256_SHA256 (0x0403)",
@@ -265,7 +435,7 @@ pub fn verify_server_key_exchange_signature(
 pub fn perform_tls_handshake_full(
     domain: &str,
     tls_version: TlsVersion,
-) -> Result<Vec<u8>, TlsError> {
+) -> Result<TlsConnectionState, TlsError> {
     let addr_str = format!("{}:443", domain);
     let mut addrs_iter = addr_str
         .to_socket_addrs()
@@ -277,6 +447,8 @@ pub fn perform_tls_handshake_full(
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| TlsError::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+
+    let mut handshake_transcript_hash = sha2::Sha256::new();
 
     let mut client_random = [0u8; 32];
     rand::thread_rng().fill(&mut client_random);
@@ -293,12 +465,17 @@ pub fn perform_tls_handshake_full(
         &client_random,
         client_ephemeral_public_bytes,
     )?;
+
+    let client_hello_handshake_message = &client_hello[5..]; // The Handshake message part without record header
+    handshake_transcript_hash.update(client_hello_handshake_message);
+
     stream.write_all(&client_hello)?;
     println!("Sent ClientHello ({} bytes)", client_hello.len());
 
     let mut server_response_buffer = Vec::new();
     let mut temp_buffer = [0; 4096];
 
+    // ... (rest of reading server response, unchanged) ...
     loop {
         match stream.read(&mut temp_buffer) {
             Ok(0) => {
@@ -312,6 +489,9 @@ pub fn perform_tls_handshake_full(
                     n,
                     server_response_buffer.len()
                 );
+                // A better approach for reading records would be to parse
+                // records iteratively and only break when expected records are received.
+                // For now, this simple read-all might suffice for small handshakes.
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 println!("Read WouldBlock, assuming no more data for now.");
@@ -332,7 +512,11 @@ pub fn perform_tls_handshake_full(
         server_response_buffer.len()
     );
     let (server_hello_parsed, certificates, server_key_exchange_parsed) =
-        handle_server_hello_flight(&server_response_buffer, tls_version)?; //call helper function
+        handle_server_hello_flight(
+            &server_response_buffer,
+            tls_version,
+            &mut handshake_transcript_hash, // Pass mutable reference to update hasher
+        )?;
 
     println!("\n--- Parsed Server Hello Flight ---");
     println!(
@@ -357,100 +541,241 @@ pub fn perform_tls_handshake_full(
     for (i, cert_der) in certificates.iter().enumerate() {
         println!("  Certificate {}: {} bytes (DER)", i + 1, cert_der.len());
     }
-    if let Some(ske_payload) = &server_key_exchange_parsed {
+    if let Some(ske_parsed_debug) = &server_key_exchange_parsed {
         println!(
             "Server Key Exchange Payload: {} bytes",
-            ske_payload.public_key.len()
+            ske_parsed_debug.public_key.len()
         );
     }
-    println!("----------------------------------");
 
-    // ---  Certificate Validation ---
-    // --- PHASE 2: Certificate Validation & Hostname Verification (Step 1) ---
+    // --- Certificate Validation ---
     println!("\n--- Phase 2: Performing Certificate Validation & Hostname Verification ---");
-    // This is where the call to your certificate_validator goes:
     certificate_validator::validate_server_certificate(&certificates, domain)?;
     println!("Server certificate chain and hostname validated successfully!");
 
-    // --- Phase 2.5: ServerKeyExchange Signature Verification (Step 2) ---
-    // This section is what replaces your old "Placeholder: Processing Server Key Exchange (TLS 1.2)"
-    if tls_version == TlsVersion::Tls12 {
-        if let Some(ske_parsed) = &server_key_exchange_parsed {
-            // Use the `ske_parsed` from handle_server_hello_flight
-            println!("--- Phase 2.5: Verifying ServerKeyExchange Signature ---");
-            verify_server_key_exchange_signature(
-                // Call your new verification function
-                ske_parsed,
-                &client_random, // You need to have `client_random` available in this scope
-                &server_hello_parsed.server_random,
-                &certificates, // Pass certificates to extract server's public key
-            )?;
-            println!("ServerKeyExchange signature verified successfully!");
-        } else {
-            println!(
-                "No ServerKeyExchange message received (might be using RSA key exchange, or TLS 1.3)."
-            );
-        }
+    // --- Core Handshake Logic: Based on TLS Version ---
+    // This block now sets up and returns all the derived keys as owned Vec<u8>
+    let (
+        master_secret,
+        client_write_key,
+        server_write_key,
+        client_fixed_iv,
+        server_fixed_iv,
+        chosen_cipher_suite_struct,
+    ) = if tls_version == TlsVersion::Tls12 {
+        let ske = server_key_exchange_parsed.ok_or_else(|| {
+            TlsError::HandshakeFailed(
+                "ServerKeyExchange expected but not received for TLS 1.2 ECDHE cipher suite."
+                    .into(),
+            )
+        })?;
+
+        println!("--- Phase 2.5: Verifying ServerKeyExchange Signature ---");
+        verify_server_key_exchange_signature(
+            &ske,
+            &client_random,
+            &server_hello_parsed.server_random,
+            &certificates,
+        )?;
+        println!("✓ ServerKeyExchange signature verified.");
+
+        use p256::{EncodedPoint, PublicKey};
+
+        println!("--- Phase 3.1: Computing Pre-Master Secret ---");
+
+        let server_ephemeral_point = EncodedPoint::from_bytes(&ske.public_key).map_err(|_| {
+            TlsError::KeyDerivationError("Invalid server ephemeral public key format".into())
+        })?;
+
+        let server_public_key = PublicKey::from_encoded_point(&server_ephemeral_point)
+            .into_option()
+            .ok_or_else(|| {
+                TlsError::KeyDerivationError("Invalid EC point encoding or public key.".into())
+            })?;
+
+        let shared_secret = client_ephemeral_secret.diffie_hellman(&server_public_key);
+        let pre_master_secret = shared_secret.raw_secret_bytes().to_vec();
+
+        println!(
+            "✓ Pre-Master Secret computed ({} bytes)",
+            pre_master_secret.len()
+        );
+
+        println!("--- Phase 3.2: Deriving Master Secret ---");
+        let master_secret = derive_master_secret(
+            &pre_master_secret,
+            &client_random,
+            &server_hello_parsed.server_random,
+            tls_version,
+        )?;
+        println!("✓ Master Secret derived ({} bytes)", master_secret.len());
+
+        println!("--- Phase 3.3: Deriving Key Block ---");
+
+        let chosen_cipher_suite_struct =
+            super::tls_parser::get_cipher_suite_by_id(&server_hello_parsed.chosen_cipher_suite)
+                .ok_or_else(|| {
+                    TlsError::HandshakeFailed("Unsupported cipher suite from server".into())
+                })?;
+
+        let key_block = derive_key_block(
+            &master_secret,
+            &client_random,
+            &server_hello_parsed.server_random,
+            chosen_cipher_suite_struct,
+            tls_version,
+        )?;
+        println!("Key Block derived ({} bytes)", key_block.len());
+
+        let key_len = chosen_cipher_suite_struct.key_length as usize;
+        let fixed_iv_len = chosen_cipher_suite_struct.fixed_iv_length as usize;
+        let mac_key_len = chosen_cipher_suite_struct.mac_key_length as usize; // Added this line
+
+        // Clone slices to own the data and return them from the if block
+        let client_write_key = key_block[mac_key_len..(mac_key_len + key_len)].to_vec();
+        let server_write_key =
+            key_block[(mac_key_len + key_len)..(mac_key_len + key_len * 2)].to_vec();
+        let client_fixed_iv = key_block
+            [(mac_key_len + key_len * 2)..(mac_key_len + key_len * 2 + fixed_iv_len)]
+            .to_vec();
+        let server_fixed_iv = key_block[(mac_key_len + key_len * 2 + fixed_iv_len)
+            ..(mac_key_len + key_len * 2 + fixed_iv_len * 2)]
+            .to_vec();
+
+        println!("✓ Extracted individual session keys from Key Block.");
+
+        (
+            master_secret,
+            client_write_key,
+            server_write_key,
+            client_fixed_iv,
+            server_fixed_iv,
+            chosen_cipher_suite_struct,
+        )
     } else if tls_version == TlsVersion::Tls13 {
-        println!("TLS 1.3 negotiated, ServerKeyExchange is not used.");
-    }
+        return Err(TlsError::HandshakeFailed(
+            "TLS 1.3 key exchange not yet implemented.".into(),
+        ));
+    } else {
+        return Err(TlsError::HandshakeFailed(
+            "Unsupported TLS version or key exchange type.".into(),
+        ));
+    };
 
-    // --- Placeholder for Phase 3: Key Exchange and Key Derivation ---
-    println!("--- Placeholder: Performing Key Exchange & Key Derivation (Phase 3) ---");
-    let pre_master_secret = vec![0; 48]; // Dummy for now
-    let (_client_write_key, _server_write_key, _client_iv, _server_iv) = derive_session_keys(
-        &pre_master_secret,
-        &client_random,
-        &server_hello_parsed.server_random,
-        &server_hello_parsed.chosen_cipher_suite,
-        tls_version,
+    // --- Phase 4: Client Sends ChangeCipherSpec and Finished ---
+    println!("\n--- Phase 4: Client Sending Final Handshake ---");
+
+    // First, get the final hash of all messages up to this point for the client's Finished message
+    // We CLONE the hasher because its state is needed for verifying the server's Finished message later.
+    let client_finished_hash_input = handshake_transcript_hash.clone().finalize();
+
+    // Second, compute the verify_data using the PRF
+    let verify_data = prf_tls12(
+        &master_secret,
+        b"client finished",
+        client_finished_hash_input.as_slice(),
+        12, // verify_data is 12 bytes for TLS 1.2
     )?;
-    println!("(Dummy) Session keys derived.");
+    println!("✓ Computed Finished verify_data");
 
-    // --- Placeholder for Phase 4: Client Sends ChangeCipherSpec and Finished ---
-    println!("--- Placeholder: Client Sending Final Handshake (Phase 4) ---");
-    let change_cipher_spec = build_change_cipher_spec();
+    // Third, construct the plaintext Finished handshake message
+    let mut finished_message_plaintext = Vec::new();
+    finished_message_plaintext.push(HandshakeMessageType::Finished as u8); // 0x14
+    finished_message_plaintext.extend_from_slice(&(12u32.to_be_bytes()[1..])); // Length (12)
+    finished_message_plaintext.extend_from_slice(&verify_data);
+
+    // Update the handshake hash with the *plaintext* Finished message
+    handshake_transcript_hash.update(&finished_message_plaintext);
+    println!("Added plaintext Client Finished message to handshake transcript hash.");
+
+    // Send the ChangeCipherSpec message FIRST (it's not encrypted)
+    let change_cipher_spec = build_change_cipher_spec(); // This is a simple 1-byte message for TLS 1.2
     stream.write_all(&change_cipher_spec)?;
-    println!("(Dummy) Sent ChangeCipherSpec.");
+    println!("Sent ChangeCipherSpec.");
 
-    let finished_message_content = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF];
-    let encrypted_finished = encrypt_handshake_message(
-        &finished_message_content,
-        &vec![0; 16],
-        &vec![0; 12],
+    // Now, call the real encryption function to get the payload
+    let encrypted_finished_payload = encrypt_gcm_message(
+        &finished_message_plaintext,
+        &client_write_key,                // Borrow reference to the owned Vec<u8>
+        &client_fixed_iv,                 // Borrow reference to the owned Vec<u8>
+        0, // This is the first encrypted record, so client sequence number is 0
+        super::tls_parser::TLS_HANDSHAKE, // Content Type for Finished message
         tls_version,
     )?;
-    stream.write_all(&encrypted_finished)?;
-    println!("(Dummy) Sent Encrypted Finished.");
+    println!(
+        "✓ Encrypted Finished message payload generated ({} bytes).",
+        encrypted_finished_payload.len()
+    );
 
-    // --- Placeholder for Phase 5: Awaiting Server ChangeCipherSpec and Finished ---
-    println!("--- Placeholder: Awaiting Server Final Handshake (Phase 5) ---");
+    // Wrap the encrypted payload in a TLS record and send it
+    let mut encrypted_finished_record = Vec::new();
+    encrypted_finished_record.push(super::tls_parser::TLS_HANDSHAKE); // Content Type: Handshake
+    let (major, minor) = tls_version.into();
+    encrypted_finished_record.push(major);
+    encrypted_finished_record.push(minor);
+    encrypted_finished_record
+        .extend_from_slice(&(encrypted_finished_payload.len() as u16).to_be_bytes());
+    encrypted_finished_record.extend_from_slice(&encrypted_finished_payload);
+
+    stream.write_all(&encrypted_finished_record)?;
+    println!(
+        "Sent Encrypted Finished record ({} bytes).",
+        encrypted_finished_record.len()
+    );
+
+    // --- Phase 5: Awaiting Server ChangeCipherSpec and Finished ---
+    println!("--- Phase 5: Awaiting Server Final Handshake ---");
     let mut final_server_response_buffer = Vec::new();
+    // ... (rest of server response reading loop, unchanged for now) ...
     loop {
         match stream.read(&mut temp_buffer) {
-            Ok(0) => break,
+            Ok(0) => break, // EOF
             Ok(n) => {
                 final_server_response_buffer.extend_from_slice(&temp_buffer[..n]);
+                // A robust solution would parse records here and break once expected ones are received.
+                // For a simple handshake, an arbitrary length might work.
                 if final_server_response_buffer.len() > 100 {
+                    // Enough for CCS + Encrypted Finished
                     break;
-                } // Placeholder
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(100)); // Wait a bit if no data immediately
             }
             Err(e) => return Err(TlsError::IoError(e)),
         }
     }
     println!(
-        "(Dummy) Received server's final handshake bytes. Need to parse ChangeCipherSpec and Finished."
+        "Received server's final handshake bytes. Need to parse ChangeCipherSpec and Finished."
     );
-    Ok(vec![])
+
+    // TODO: Parse and verify server's ChangeCipherSpec and Finished messages
+    // This involves decrypting the Finished message and verifying its content (using server_write_key/IV)
+    // and verifying the server's handshake_messages_hash.
+
+    println!("\n✓ TLS Handshake process completed (remaining steps are placeholders).");
+
+    Ok(TlsConnectionState {
+        master_secret,
+        client_write_key,
+        server_write_key,
+        client_fixed_iv,
+        server_fixed_iv,
+        client_sequence_number: 1, // Next client outgoing record will be 1
+        server_sequence_number: 0, // Server's first incoming record (Finished) is 0
+        negotiated_cipher_suite: *chosen_cipher_suite_struct,
+        negotiated_tls_version: tls_version,
+        client_random,
+        server_random: server_hello_parsed.server_random, // Store server_random for future use
+        handshake_hasher: handshake_transcript_hash, // Pass the hasher state for server Finished verification
+    })
 }
 
 // (The handle_server_hello_flight function would come after perform_tls_handshake_full)
 pub fn handle_server_hello_flight(
     response_bytes: &[u8],
     _tls_client_version: TlsVersion,
+    handshake_transcript_hash: &mut Sha256,
 ) -> Result<
     (
         ServerHelloParsed,
@@ -492,6 +817,7 @@ pub fn handle_server_hello_flight(
                                 msg.payload.len()
                             );
 
+                            handshake_transcript_hash.update(&msg.raw_bytes);
                             match msg.msg_type {
                                 //_ to hide error
                                 HandshakeMessageType::ServerHello => {
@@ -541,13 +867,6 @@ pub fn handle_server_hello_flight(
                                                 ))
                                             },
                                         )?,
-                                    );
-                                }
-
-                                HandshakeMessageType::Unknown(t) => {
-                                    println!(
-                                        "Encountered unknown handshake message type: 0x{:02X}",
-                                        t
                                     );
                                 }
 

@@ -1,22 +1,34 @@
 // src/services/tls_parser.rs
 
-// Corrected imports for byteorder traits and types
-use byteorder::{BigEndian, ReadBytesExt}; // ReadBytesExt for read_u8, read_u16, read_u24
-use std::io::{Cursor, Read}; // Read trait for read_exact
+use super::errors::TlsError; // Make sure TlsError is imported correctly
+use byteorder::{BigEndian, ReadBytesExt};
+use std::io::{Cursor, Read};
 
-// contants for TLS record types
-pub const TLS_HANDSHAKE: u8 = 0x16;
-pub const TLS_ALERT: u8 = 0x15;
-pub const TLS_CHANGE_CIPHER_SPEC: u8 = 0x14;
-pub const TLS_APPLICATION_DATA: u8 = 0x17;
+// --- Public Constants for TLS Protocol Values (moved from messages.rs) ---
+// TLS Versions
+pub const TLS_1_2_MAJOR: u8 = 0x03;
+pub const TLS_1_2_MINOR: u8 = 0x03;
 
-//constants for TLS handshake message types
-pub const HANDSHAKE_CLIENT_HELLO: u8 = 0x01;
-pub const HANDSHAKE_SERVER_HELLO: u8 = 0x02;
-pub const HANDSHAKE_CERTIFICATE: u8 = 0x0B;
-pub const HANDSHAKE_SERVER_KEY_EXCHANGE: u8 = 0x0C;
-pub const HANDSHAKE_SERVER_HELLO_DONE: u8 = 0x0E;
-pub const HANDSHAKE_FINISHED: u8 = 0x14;
+// ClientHello specific
+pub const SESSION_ID_LEN_EMPTY: u8 = 0x00;
+pub const COMPRESSION_METHOD_NULL: u8 = 0x00;
+pub const COMPRESSION_METHODS_LEN: u8 = 0x01; // Length of the list of compression methods
+
+// Extension Types (2 bytes)
+pub const EXTENSION_TYPE_SERVER_NAME: u16 = 0x0000;
+pub const EXTENSION_TYPE_SUPPORTED_GROUPS: u16 = 0x000A;
+pub const EXTENSION_TYPE_KEY_SHARE: u16 = 0x0033;
+pub const EXTENSION_TYPE_SUPPORTED_VERSIONS: u16 = 0x002B;
+pub const EXTENSION_TYPE_SIGNATURE_ALGORITHMS: u16 = 0x000D;
+
+// Server Name Indication (SNI)
+pub const SNI_HOSTNAME_TYPE: u8 = 0x00;
+
+// Signature Algorithms (2 bytes each)
+pub const SIG_ALG_ECDSA_SECP256R1_SHA256: [u8; 2] = [0x04, 0x03];
+pub const SIG_ALG_RSA_PSS_RSAE_SHA256: [u8; 2] = [0x08, 0x04];
+pub const SIG_ALG_RSA_PSS_RSAE_SHA512: [u8; 2] = [0x08, 0x05];
+pub const SIG_ALG_RSA_PKCS1_SHA256: [u8; 2] = [0x04, 0x01];
 
 #[derive(Debug)]
 pub enum TlsParserError {
@@ -77,24 +89,45 @@ impl std::fmt::Display for TlsParserError {
 
 impl std::error::Error for TlsParserError {}
 
-#[derive(Debug, Clone)]
+// *** REMOVED: impl From<std::io::Error> for TlsParserError block from here ***
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)] // Ensures the enum variants correspond directly to their u8 values
 pub enum TlsContentType {
-    ChangeCipherSpec,
-    Alert,
-    Handshake,
-    ApplicationData,
-    Unknown(u8),
+    ChangeCipherSpec = 0x14,
+    Alert = 0x15,
+    Handshake = 0x16,
+    ApplicationData = 0x17,
+    // Heartbeat = 0x18, // If you need TLS 1.2 Heartbeat, uncomment this
 }
 
+impl TlsContentType {
+    pub fn as_u8(&self) -> u8 {
+        *self as u8
+    }
+    // A more robust conversion from u8 that returns Option or Result
+    pub fn try_from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x14 => Some(TlsContentType::ChangeCipherSpec),
+            0x15 => Some(TlsContentType::Alert),
+            0x16 => Some(TlsContentType::Handshake),
+            0x17 => Some(TlsContentType::ApplicationData),
+            // 0x18 => Some(TlsContentType::Heartbeat), // Uncomment if Heartbeat is added
+            _ => None, // Return None for unknown values
+        }
+    }
+}
+
+// The From<u8> for TlsContentType should now use try_from_u8 and handle the None case
 impl From<u8> for TlsContentType {
     fn from(value: u8) -> Self {
-        match value {
-            TLS_CHANGE_CIPHER_SPEC => TlsContentType::ChangeCipherSpec,
-            TLS_ALERT => TlsContentType::Alert,
-            TLS_HANDSHAKE => TlsContentType::Handshake,
-            TLS_APPLICATION_DATA => TlsContentType::ApplicationData,
-            _ => TlsContentType::Unknown(value),
-        }
+        TlsContentType::try_from_u8(value).unwrap_or_else(|| {
+            // If try_from_u8 returns None, we map to a GenericError
+            // This approach ensures that we don't have an "Unknown" variant for construction,
+            // only for parsing if you truly need to represent an unknown type.
+            // For a strict client, mapping to an error is often better.
+            panic!("Invalid TlsContentType value: 0x{:02X}", value); // Or a specific error handling
+        })
     }
 }
 
@@ -107,34 +140,155 @@ pub struct TlsRecord {
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub enum HandshakeMessageType {
-    ClientHello,
-    ServerHello,
-    Certificate,
-    ServerKeyExchange,
-    ServerHelloDone,
-    Finished,
-    Unknown(u8),
+impl TlsRecord {
+    pub fn version_major_minor(&self) -> (u8, u8) {
+        (self.version_major, self.version_minor)
+    }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum HandshakeMessageType {
+    HelloRequest = 0x00,
+    ClientHello = 0x01,
+    ServerHello = 0x02,
+    NewSessionTicket = 0x04,    // TLS 1.2/1.3
+    EndOfEarlyData = 0x05,      // TLS 1.3
+    EncryptedExtensions = 0x08, // TLS 1.3
+    Certificate = 0x0B,
+    ServerKeyExchange = 0x0C, // TLS 1.2
+    CertificateRequest = 0x0D,
+    ServerHelloDone = 0x0E, // TLS 1.2
+    CertificateVerify = 0x0F,
+    ClientKeyExchange = 0x10, // TLS 1.2
+    Finished = 0x14,
+    KeyUpdate = 0x18,   // TLS 1.3
+    MessageHash = 0xFE, // TLS 1.3
+}
+
+impl HandshakeMessageType {
+    pub fn as_u8(&self) -> u8 {
+        *self as u8
+    }
+    // A more robust conversion from u8 that returns Option or Result
+    pub fn try_from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x00 => Some(HandshakeMessageType::HelloRequest),
+            0x01 => Some(HandshakeMessageType::ClientHello),
+            0x02 => Some(HandshakeMessageType::ServerHello),
+            0x04 => Some(HandshakeMessageType::NewSessionTicket),
+            0x05 => Some(HandshakeMessageType::EndOfEarlyData),
+            0x08 => Some(HandshakeMessageType::EncryptedExtensions),
+            0x0B => Some(HandshakeMessageType::Certificate),
+            0x0C => Some(HandshakeMessageType::ServerKeyExchange),
+            0x0D => Some(HandshakeMessageType::CertificateRequest),
+            0x0E => Some(HandshakeMessageType::ServerHelloDone),
+            0x0F => Some(HandshakeMessageType::CertificateVerify),
+            0x10 => Some(HandshakeMessageType::ClientKeyExchange),
+            0x14 => Some(HandshakeMessageType::Finished),
+            0x18 => Some(HandshakeMessageType::KeyUpdate),
+            0xFE => Some(HandshakeMessageType::MessageHash),
+            _ => None,
+        }
+    }
+}
+
+// Adjusted From<u8> for HandshakeMessageType to use try_from_u8
 impl From<u8> for HandshakeMessageType {
     fn from(value: u8) -> Self {
-        match value {
-            HANDSHAKE_CLIENT_HELLO => HandshakeMessageType::ClientHello,
-            HANDSHAKE_SERVER_HELLO => HandshakeMessageType::ServerHello,
-            HANDSHAKE_CERTIFICATE => HandshakeMessageType::Certificate,
-            HANDSHAKE_SERVER_KEY_EXCHANGE => HandshakeMessageType::ServerKeyExchange,
-            HANDSHAKE_SERVER_HELLO_DONE => HandshakeMessageType::ServerHelloDone,
-            HANDSHAKE_FINISHED => HandshakeMessageType::Finished,
-            _ => HandshakeMessageType::Unknown(value),
+        HandshakeMessageType::try_from_u8(value).unwrap_or_else(|| {
+            panic!("Invalid HandshakeMessageType value: 0x{:02X}", value);
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsVersion {
+    TLS1_0, // 0x0301
+    TLS1_1, // 0x0302
+    TLS1_2, // 0x0303
+    TLS1_3, // 0x0304
+    Unknown(u8, u8),
+}
+
+impl TlsVersion {
+    pub fn from_u8_pair(major: u8, minor: u8) -> Self {
+        match (major, minor) {
+            (0x03, 0x01) => TlsVersion::TLS1_0,
+            (0x03, 0x02) => TlsVersion::TLS1_1,
+            (0x03, 0x03) => TlsVersion::TLS1_2,
+            (0x03, 0x04) => TlsVersion::TLS1_3,
+            _ => TlsVersion::Unknown(major, minor),
         }
+    }
+
+    pub fn to_u8_pair(&self) -> (u8, u8) {
+        match self {
+            TlsVersion::TLS1_0 => (0x03, 0x01),
+            TlsVersion::TLS1_1 => (0x03, 0x02),
+            TlsVersion::TLS1_2 => (0x03, 0x03),
+            TlsVersion::TLS1_3 => (0x03, 0x04),
+            TlsVersion::Unknown(maj, min) => (*maj, *min),
+        }
+    }
+}
+
+// --- New: NamedGroup Enum ---
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum NamedGroup {
+    P256 = 0x0017,
+    P384 = 0x0018,
+    Unknown(u16),
+}
+
+impl NamedGroup {
+    pub fn as_bytes(&self) -> [u8; 2] {
+        match self {
+            NamedGroup::P256 => [0x00, 0x17],
+            NamedGroup::P384 => [0x00, 0x18],
+            NamedGroup::Unknown(id) => id.to_be_bytes(),
+        }
+    }
+
+    pub fn try_from_u16(value: u16) -> Option<Self> {
+        match value {
+            0x0017 => Some(NamedGroup::P256),
+            0x0018 => Some(NamedGroup::P384),
+            _ => None,
+        }
+    }
+}
+
+// --- New: Extension Struct ---
+#[derive(Debug, Clone)]
+pub struct Extension {
+    pub extension_type: u16,
+    pub payload: Vec<u8>,
+}
+
+impl Extension {
+    pub fn new(extension_type: u16, payload: &[u8]) -> Self {
+        Extension {
+            extension_type,
+            payload: payload.to_vec(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.extension_type.to_be_bytes()); // 2 bytes for type
+        bytes.extend_from_slice(&(self.payload.len() as u16).to_be_bytes()); // 2 bytes for length
+        bytes.extend_from_slice(&self.payload); // Payload
+        bytes
     }
 }
 
 #[derive(Debug)]
 pub struct TlsHandshakeMessage {
     pub msg_type: HandshakeMessageType,
+    pub raw_bytes: Vec<u8>, // Raw bytes of the handshake message (type + length + payload)
+    pub length: u32,        // Length of the message payload
     pub payload: Vec<u8>,
 }
 
@@ -155,41 +309,67 @@ pub struct ServerKeyExchangeParsed {
     pub signature: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CipherSuite {
+    pub id: [u8; 2],
+    pub name: &'static str,
+    pub key_length: u8,
+    pub fixed_iv_length: u8,
+    pub mac_key_length: u8,
+    pub hash_algorithm: HashAlgorithm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgorithm {
+    Sha256,
+    // Add other hash algorithms as needed
+}
+
+// cipher suite
+pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite {
+    id: [0xC0, 0x2F],
+    name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    key_length: 16,     // AES-128 uses 16-byte key
+    fixed_iv_length: 4, // GCM uses a 4-byte fixed_iv for TLS 1.2
+    mac_key_length: 0,  // GCM is an AEAD cipher, MAC is integrated, so 0 separate MAC key
+    hash_algorithm: HashAlgorithm::Sha256,
+};
+
+pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<&'static CipherSuite> {
+    if id == &TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.id {
+        Some(&TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+    } else {
+        None
+    }
+}
+
 // -- functions --
-pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>, TlsParserError> {
+pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>, TlsError> {
     let current_pos = reader.position() as usize;
     let remaining_len = reader.get_ref().len() - current_pos;
 
     if remaining_len < 5 {
+        // 1 byte type + 2 bytes version + 2 bytes length
         return Ok(None);
     }
 
-    // Using ReadBytesExt methods
-    let content_type_byte = reader
-        .read_u8()
-        .map_err(|e| TlsParserError::GenericError(format!("Failed to read content type: {}", e)))?;
-    let version_major = reader.read_u8().map_err(|e| {
-        TlsParserError::GenericError(format!("Failed to read version major: {}", e))
-    })?;
-    let version_minor = reader.read_u8().map_err(|e| {
-        TlsParserError::GenericError(format!("Failed to read version minor: {}", e))
-    })?;
-    let length = reader
-        .read_u16::<BigEndian>()
-        .map_err(|e| TlsParserError::GenericError(format!("Failed to read length: {}", e)))?;
+    let content_type_byte = reader.read_u8()?;
+    let version_major = reader.read_u8()?;
+    let version_minor = reader.read_u8()?;
+    let length = reader.read_u16::<BigEndian>()?;
 
     if remaining_len < 5 + length as usize {
-        reader.set_position(current_pos as u64);
-        return Ok(None); // Return Ok(None) to indicate more data is needed, not an error
+        reader.set_position(current_pos as u64); // Rewind cursor
+        return Ok(None); // Return Ok(None) to indicate more data is needed
     }
 
     let mut payload = vec![0u8; length as usize];
-    reader
-        .read_exact(&mut payload)
-        .map_err(|e| TlsParserError::GenericError(format!("Failed to read payload: {}", e)))?;
+    reader.read_exact(&mut payload)?;
 
     Ok(Some(TlsRecord {
-        content_type: content_type_byte.into(),
+        content_type: TlsContentType::try_from_u8(content_type_byte).ok_or(
+            TlsError::ParserError(TlsParserError::InvalidContentType(content_type_byte)),
+        )?, // Map to TlsError here
         version_major,
         version_minor,
         length,
@@ -197,50 +377,46 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     }))
 }
 
-pub fn parse_handshake_messages(
-    payload: &[u8],
-) -> Result<Vec<TlsHandshakeMessage>, TlsParserError> {
-    let mut cursor = Cursor::new(payload);
+pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>, TlsError> {
+    let mut cursor = Cursor::new(data);
     let mut messages = Vec::new();
 
-    while (cursor.position() as usize) < payload.len() {
-        let msg_type_byte = cursor.read_u8().map_err(|e| {
-            TlsParserError::MalformedMessage(format!(
-                "Failed to read handshake message type: {}",
-                e
-            ))
-        })?;
-        // Use read_u24 from byteorder
-        let msg_len = cursor.read_u24::<BigEndian>().map_err(|e| {
-            TlsParserError::MalformedMessage(format!(
-                "Failed to read handshake message length: {}",
-                e
-            ))
-        })?;
+    while (cursor.position() as usize) < data.len() {
+        let start_pos = cursor.position() as usize;
 
-        let body_start = cursor.position() as usize; // Current position after reading header
-        let body_end = body_start + msg_len as usize;
-
-        if body_end > payload.len() {
-            return Err(TlsParserError::MalformedMessage(format!(
-                "Handshake message length ({}) exceeds record payload size ({}). Offset: {}",
-                msg_len,
-                payload.len(),
-                body_start
-            )));
+        // Ensure there are enough bytes for handshake header (1 type + 3 length)
+        if data.len() - start_pos < 4 {
+            return Err(TlsError::ParserError(TlsParserError::Incomplete {
+                expected: 4,
+                actual: data.len() - start_pos,
+            }));
         }
 
-        let mut msg_payload = vec![0; msg_len as usize];
-        cursor.read_exact(&mut msg_payload).map_err(|e| {
-            TlsParserError::MalformedMessage(format!(
-                "Failed to read handshake message payload: {}",
-                e
-            ))
-        })?;
+        let msg_type_byte = cursor.read_u8()?;
+        let msg_type = HandshakeMessageType::try_from_u8(msg_type_byte).ok_or(
+            TlsError::ParserError(TlsParserError::InvalidHandshakeType(msg_type_byte)),
+        )?;
+
+        let length = cursor.read_u24::<BigEndian>()?; // Changed to read_u24 for 3-byte length
+
+        if (cursor.position() as usize) + length as usize > data.len() {
+            return Err(TlsError::ParserError(TlsParserError::Incomplete {
+                expected: length as usize,
+                actual: data.len() - (cursor.position() as usize),
+            }));
+        }
+
+        let mut payload = vec![0; length as usize];
+        cursor.read_exact(&mut payload)?;
+
+        let end_pos = cursor.position() as usize;
+        let raw_bytes_for_this_message = data[start_pos..end_pos].to_vec();
 
         messages.push(TlsHandshakeMessage {
-            msg_type: msg_type_byte.into(),
-            payload: msg_payload,
+            msg_type,
+            length,
+            payload,
+            raw_bytes: raw_bytes_for_this_message,
         });
     }
     Ok(messages)
@@ -250,54 +426,28 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
     let mut cursor = Cursor::new(payload);
 
     if payload.len() < 38 {
-        // Minimum length for version, random, session ID length (0), cipher suite, compression
         return Err(TlsParserError::MalformedServerHello);
     }
 
-    let negotiated_tls_version = (
-        cursor
-            .read_u8()
-            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
-        cursor
-            .read_u8()
-            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
-    );
+    let negotiated_tls_version = (cursor.read_u8()?, cursor.read_u8()?);
     let mut server_random_bytes = [0u8; 32];
-    cursor
-        .read_exact(&mut server_random_bytes)
-        .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?;
+    cursor.read_exact(&mut server_random_bytes)?;
 
-    let session_id_len = cursor
-        .read_u8()
-        .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?
-        as usize;
-    // Skip session ID bytes if present
+    let session_id_len = cursor.read_u8()? as usize;
+
+    if cursor.position() as usize + session_id_len + 3 > payload.len() {
+        return Err(TlsParserError::MalformedServerHello);
+    }
     cursor.set_position(cursor.position() + session_id_len as u64); // Move cursor past session ID
 
-    if cursor.position() as usize + 3 > payload.len() {
-        // 2 bytes for cipher suite, 1 for compression
-        return Err(TlsParserError::MalformedServerHello);
-    }
-    let chosen_cipher_suite = [
-        cursor
-            .read_u8()
-            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
-        cursor
-            .read_u8()
-            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?,
-    ];
-    let _chosen_compression_method = cursor
-        .read_u8()
-        .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?;
+    let chosen_cipher_suite = [cursor.read_u8()?, cursor.read_u8()?];
+    let _chosen_compression_method = cursor.read_u8()?;
 
     let mut server_key_share_public: Option<Vec<u8>> = None;
 
     // Check if there are extensions
     if (cursor.position() as usize) < payload.len() {
-        let extensions_len = cursor
-            .read_u16::<BigEndian>()
-            .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?
-            as usize;
+        let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
         let extensions_start_pos = cursor.position() as usize;
 
         if extensions_start_pos + extensions_len > payload.len() {
@@ -310,13 +460,8 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
         let mut ext_cursor = Cursor::new(&payload[extensions_start_pos..extensions_data_end]);
 
         while (ext_cursor.position() as usize) + 4 <= ext_cursor.get_ref().len() {
-            let ext_type = ext_cursor
-                .read_u16::<BigEndian>()
-                .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?;
-            let ext_len = ext_cursor
-                .read_u16::<BigEndian>()
-                .map_err(|e| TlsParserError::MalformedServerHello.into_generic(e))?
-                as usize;
+            let ext_type = ext_cursor.read_u16::<BigEndian>()?;
+            let ext_len = ext_cursor.read_u16::<BigEndian>()? as usize;
 
             if (ext_cursor.position() as usize) + ext_len > ext_cursor.get_ref().len() {
                 return Err(TlsParserError::MalformedMessage(
@@ -328,12 +473,9 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
             let ext_content_end = ext_content_start + ext_len;
             let ext_content = &ext_cursor.get_ref()[ext_content_start..ext_content_end];
 
-            // Handle key_share extension for TLS 1.3
-            // Note: This is specifically for TLS 1.3's key_share.
-            // TLS 1.2 would use ServerKeyExchange message for ephemeral keys.
             if negotiated_tls_version.0 == 0x03 && negotiated_tls_version.1 == 0x04 {
-                if ext_type == 0x0033 {
-                    // key_share extension
+                if ext_type == EXTENSION_TYPE_KEY_SHARE {
+                    // Using the new constant
                     if ext_content.len() < 4 {
                         // Group (2 bytes) + Key Exchange Length (2 bytes)
                         return Err(TlsParserError::MalformedMessage(
@@ -350,8 +492,7 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
                         ));
                     }
 
-                    if group_id == 0x0017 || group_id == 0x001D {
-                        // secp256r1 or x25519
+                    if NamedGroup::try_from_u16(group_id).is_some() {
                         server_key_share_public =
                             Some(ext_content[4..4 + key_exchange_len].to_vec());
                     } else {
@@ -376,7 +517,6 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
     })
 }
 
-// --- Helper function for certificate list parsing (for Certificate message payload) ---
 pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserError> {
     let mut cursor = Cursor::new(payload);
 
@@ -384,13 +524,8 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
         return Err(TlsParserError::MalformedCertificateList);
     }
 
-    // Read total length of certificate list (3 bytes)
-    let total_certs_len = cursor.read_u24::<BigEndian>().map_err(|e| {
-        TlsParserError::MalformedMessage(format!("Failed to read certificate list length: {}", e))
-    })? as usize;
+    let total_certs_len = cursor.read_u24::<BigEndian>()? as usize;
 
-    // The total_certs_len should match the remaining payload length
-    // after reading the 3-byte length field.
     if total_certs_len != payload.len() - (cursor.position() as usize) {
         return Err(TlsParserError::MalformedMessage(format!(
             "Certificate list declared length ({}) does not match actual remaining payload ({}).",
@@ -402,12 +537,9 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
     let mut certificates = Vec::new();
     while (cursor.position() as usize) < payload.len() {
         if (cursor.position() as usize) + 3 > payload.len() {
-            return Err(TlsParserError::MalformedCertificateList); // Not enough bytes for next cert length
+            return Err(TlsParserError::MalformedCertificateList);
         }
-        // Read individual certificate length (3 bytes)
-        let cert_len = cursor.read_u24::<BigEndian>().map_err(|e| {
-            TlsParserError::MalformedMessage(format!("Failed to read certificate length: {}", e))
-        })? as usize;
+        let cert_len = cursor.read_u24::<BigEndian>()? as usize;
 
         if (cursor.position() as usize) + cert_len > payload.len() {
             return Err(TlsParserError::MalformedMessage(format!(
@@ -418,13 +550,10 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
         }
 
         let mut cert_bytes = vec![0; cert_len];
-        cursor.read_exact(&mut cert_bytes).map_err(|e| {
-            TlsParserError::MalformedMessage(format!("Failed to read certificate bytes: {}", e))
-        })?;
+        cursor.read_exact(&mut cert_bytes)?;
         certificates.push(cert_bytes);
     }
 
-    // After parsing all certs, the cursor should be at the end of the payload
     if (cursor.position() as usize) != payload.len() {
         return Err(TlsParserError::MalformedMessage(
             "Trailing data found after certificate list parsing.".to_string(),
@@ -437,51 +566,30 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
 pub fn parse_server_key_exchange_content(
     payload: &[u8],
 ) -> Result<ServerKeyExchangeParsed, TlsParserError> {
-    // Changed error type to TlsParserError
     let mut cursor = Cursor::new(payload);
 
-    // 1. EC Curve Type (1 byte) - always 0x03 for named_curve
-    let curve_type = cursor
-        .read_u8()
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+    let curve_type = cursor.read_u8()?;
     if curve_type != 0x03 {
-        return Err(TlsParserError::InvalidNamedGroup(curve_type as u16)); // More specific error
+        return Err(TlsParserError::InvalidNamedGroup(curve_type as u16));
     }
 
-    // 2. Named Curve (2 bytes) - e.g., secp256r1 (0x0017)
-    let named_curve = cursor
-        .read_u16::<BigEndian>()
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+    let named_curve = cursor.read_u16::<BigEndian>()?;
+    if NamedGroup::try_from_u16(named_curve).is_none() {
+        return Err(TlsParserError::InvalidNamedGroup(named_curve));
+    }
 
-    // 3. Public Key Length (1 byte)
-    let public_key_len = cursor
-        .read_u8()
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?
-        as usize;
+    let public_key_len = cursor.read_u8()? as usize;
 
-    // 4. Public Key (variable length)
     let mut public_key_bytes = vec![0; public_key_len];
-    cursor
-        .read_exact(&mut public_key_bytes)
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+    cursor.read_exact(&mut public_key_bytes)?;
 
-    // 5. Signature Algorithm (2 bytes)
     let mut signature_algorithm = [0; 2];
-    cursor
-        .read_exact(&mut signature_algorithm)
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+    cursor.read_exact(&mut signature_algorithm)?;
 
-    // 6. Signature Length (2 bytes)
-    let signature_len = cursor
-        .read_u16::<BigEndian>()
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?
-        as usize;
+    let signature_len = cursor.read_u16::<BigEndian>()? as usize;
 
-    // 7. Signature (variable length)
     let mut signature_bytes = vec![0; signature_len];
-    cursor
-        .read_exact(&mut signature_bytes)
-        .map_err(|e| TlsParserError::MalformedServerKeyExchange.into_generic(e))?;
+    cursor.read_exact(&mut signature_bytes)?;
 
     if cursor.position() as usize != payload.len() {
         return Err(TlsParserError::MalformedMessage(
@@ -494,29 +602,6 @@ pub fn parse_server_key_exchange_content(
         named_curve,
         public_key: public_key_bytes,
         signature_algorithm,
-        signature: signature_bytes, // FIXED: Matches struct definition (Vec<u8>)
+        signature: signature_bytes,
     })
-}
-
-// Helper trait to convert std::io::Error to TlsParserError::GenericError
-trait IntoGenericError<T> {
-    fn into_generic(self, context: T) -> TlsParserError;
-}
-
-impl<E: std::fmt::Display> IntoGenericError<E> for TlsParserError {
-    fn into_generic(self, context: E) -> TlsParserError {
-        match self {
-            TlsParserError::MalformedServerHello => TlsParserError::MalformedMessage(format!(
-                "Malformed ServerHello message: {}",
-                context
-            )),
-            TlsParserError::MalformedServerKeyExchange => TlsParserError::MalformedMessage(
-                format!("Malformed ServerKeyExchange message: {}", context),
-            ),
-            TlsParserError::MalformedCertificateList => {
-                TlsParserError::MalformedMessage(format!("Malformed Certificate list: {}", context))
-            }
-            _ => TlsParserError::GenericError(format!("Parser error: {}", context)),
-        }
-    }
 }
