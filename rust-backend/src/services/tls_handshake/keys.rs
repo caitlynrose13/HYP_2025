@@ -26,7 +26,7 @@ pub fn calculate_master_secret(
     seed.extend_from_slice(server_random);
 
     let mut master_secret = [0u8; 48];
-    tls12_prf(pre_master_secret, &seed, &mut master_secret)
+    prf_tls12(pre_master_secret, &seed, &mut master_secret)
         .map_err(|e| TlsError::KeyDerivationError(format!("PRF error: {}", e)))?;
 
     Ok(master_secret)
@@ -49,14 +49,14 @@ pub fn calculate_key_block(
             as usize;
 
     let mut key_block = vec![0u8; total_len];
-    tls12_prf(master_secret, &seed, &mut key_block)
+    prf_tls12(master_secret, &seed, &mut key_block)
         .map_err(|e| TlsError::KeyDerivationError(format!("Key block PRF error: {}", e)))?;
 
     Ok(key_block)
 }
 
 /// --- PRF (TLS 1.2 with SHA256 only) ---
-fn tls12_prf(secret: &[u8], seed: &[u8], result: &mut [u8]) -> Result<(), String> {
+pub fn prf_tls12(secret: &[u8], seed: &[u8], result: &mut [u8]) -> Result<(), String> {
     tls12_prf_p_hash(HashAlgorithm::Sha256, secret, seed, result)
 }
 
@@ -146,7 +146,7 @@ pub fn calculate_verify_data(
     handshake_messages: &[u8],
     label: &[u8],
 ) -> Result<Vec<u8>, TlsError> {
-    let mut hasher = Sha256::new();
+    let mut hasher = sha2::Sha256::new();
     hasher.update(handshake_messages);
     let handshake_hash = hasher.finalize();
 
@@ -154,11 +154,10 @@ pub fn calculate_verify_data(
     seed.extend_from_slice(label);
     seed.extend_from_slice(&handshake_hash);
 
-    let mut verify_data = vec![0u8; 12];
-    tls12_prf(master_secret, &seed, &mut verify_data)
-        .map_err(|e| TlsError::KeyDerivationError(format!("VerifyData error: {}", e)))?;
+    let mut verify_data = [0u8; 12];
+    prf_tls12(&master_secret, &seed, &mut verify_data).map_err(TlsError::KeyDerivationError)?;
 
-    Ok(verify_data)
+    Ok(verify_data.to_vec())
 }
 
 pub fn encrypt_gcm_message(
@@ -197,7 +196,6 @@ pub fn encrypt_gcm_message(
 }
 
 /// Decrypts a TLS 1.2 GCM message payload.
-// ... (documentation) ...
 pub fn decrypt_gcm_message(
     ciphertext_with_tag: &[u8],
     key: &AesGcm<Aes128, U12, U16>, // <--- CORRECTED KEY TYPE
