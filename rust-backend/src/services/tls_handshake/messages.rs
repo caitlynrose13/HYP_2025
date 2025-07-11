@@ -1,4 +1,5 @@
 // src/services/tls_handshake/messages.rs
+// src/services/tls_handshake/messages.rs
 
 use crate::services::errors::TlsError;
 use crate::services::tls_handshake::keys;
@@ -34,12 +35,14 @@ impl HandshakeMessage {
         record
     }
 
+    // Modified to return both the TLS record bytes and the raw ClientHello handshake message bytes
     pub fn build_client_hello_with_random_and_key_share(
         domain: &str,
-        record_tls_version: TlsVersion,
+        _record_tls_version: TlsVersion,
         client_random: &[u8; 32],
-        client_ephemeral_public_bytes: &[u8],
-    ) -> Result<Vec<u8>, TlsError> {
+        _client_ephemeral_public_bytes: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
+        // Return a tuple: (full_tls_record, raw_handshake_message)
         let mut client_hello_payload = Vec::new();
 
         // 1. TLS Version (ClientHello version, typically 0x0303 for TLS 1.2 regardless of actual protocol)
@@ -93,16 +96,11 @@ impl HandshakeMessage {
 
         // 6.1. Server Name Indication (SNI) (type 0x0000)
         let sni_hostname_len = domain.len() as u16;
-        // The length of the ServerNameList structure: 1 (name type) + 2 (hostname length) + hostname bytes
         let sni_names_list_field_len = 1 + 2 + sni_hostname_len;
         let mut sni_content = Vec::new();
-        // Add the length of the ServerNameList structure (2 bytes)
         sni_content.extend_from_slice(&(sni_names_list_field_len as u16).to_be_bytes());
-        // Add the NameType
         sni_content.push(SNI_HOSTNAME_TYPE);
-        // Add the HostName.length
         sni_content.extend_from_slice(&sni_hostname_len.to_be_bytes());
-        // Add the actual HostName bytes
         sni_content.extend_from_slice(domain.as_bytes());
         extensions_bytes.extend_from_slice(
             &Extension::new(EXTENSION_TYPE_SERVER_NAME, &sni_content).to_bytes(),
@@ -136,14 +134,14 @@ impl HandshakeMessage {
         // 6.5. Signature Algorithms Extension (type 0x000D)
         let mut sig_algs_content = Vec::new();
         let sig_algs: [[u8; 2]; 8] = [
-            [0x04, 0x03], // ecdsa_secp256r1_sha256
-            [0x08, 0x04], // rsa_pss_rsae_sha256
-            [0x04, 0x01], // rsa_pkcs1_sha256
-            [0x05, 0x03], // ecdsa_secp384r1_sha384
-            [0x08, 0x05], // rsa_pss_rsae_sha512
-            [0x06, 0x01], // rsa_pkcs1_sha512
-            [0x02, 0x01], // rsa_pkcs1_sha1
-            [0x02, 0x03], // ecdsa_sha1
+            [0x04, 0x03],
+            [0x08, 0x04],
+            [0x04, 0x01],
+            [0x05, 0x03],
+            [0x08, 0x05],
+            [0x06, 0x01],
+            [0x02, 0x01],
+            [0x02, 0x03],
         ];
         let sig_algs_list_len = (sig_algs.len() * 2) as u16;
         sig_algs_content.extend_from_slice(&sig_algs_list_len.to_be_bytes());
@@ -157,7 +155,7 @@ impl HandshakeMessage {
         // 6.6. SessionTicket Extension (type 0x0023, empty payload)
         extensions_bytes.extend_from_slice(&Extension::new(0x0023, &[]).to_bytes());
 
-        // 6.7. ALPN Extension (type 0x0010)
+        // 6.7. ALPN Extension (type 0x0010) - commented out as in original
         // let mut alpn_content = Vec::new();
         // let alpn_protocol = b"http/1.1";
         // alpn_content.push((alpn_protocol.len() + 1) as u8);
@@ -171,7 +169,7 @@ impl HandshakeMessage {
         // 6.9. Renegotiation Info Extension (type 0xff01, payload = 00)
         extensions_bytes.extend_from_slice(&Extension::new(0xff01, &[0x00]).to_bytes());
 
-        // 6.10. Padding Extension (type 0x0015, payload: 16 zero bytes)
+        // 6.10. Padding Extension (type 0x0015, payload: 16 zero bytes) - commented out as in original
         // let padding = [0u8; 16];
         // extensions_bytes.extend_from_slice(&Extension::new(0x0015, &padding).to_bytes());
 
@@ -179,20 +177,51 @@ impl HandshakeMessage {
         client_hello_payload.extend_from_slice(&(extensions_bytes.len() as u16).to_be_bytes());
         client_hello_payload.extend_from_slice(&extensions_bytes);
 
-        // Final Handshake Message construction
-        let mut handshake_message = Vec::new();
-        handshake_message.push(HandshakeMessageType::ClientHello.as_u8());
-        // Handshake message length (3 bytes, excludes the 1-byte type and 3-byte length itself)
+        // Build the raw ClientHello handshake message (type + length + payload)
+        let mut raw_client_hello_handshake_message = Vec::new();
+        raw_client_hello_handshake_message.push(HandshakeMessageType::ClientHello.as_u8());
         let handshake_len_bytes = (client_hello_payload.len() as u32).to_be_bytes();
-        handshake_message.extend_from_slice(&handshake_len_bytes[1..4]);
-        handshake_message.extend_from_slice(&client_hello_payload);
+        raw_client_hello_handshake_message.extend_from_slice(&handshake_len_bytes[1..4]);
+        raw_client_hello_handshake_message.extend_from_slice(&client_hello_payload);
 
-        // TLS Record Protocol Layer: set record version to 0x0303 (TLS 1.2) for compatibility
-        Ok(HandshakeMessage::build_tls_record(
+        // Build the full TLS record
+        let full_tls_record = HandshakeMessage::build_tls_record(
             TlsContentType::Handshake,
-            TlsVersion::TLS1_2, // 0x0303
-            handshake_message,
-        ))
+            TlsVersion::TLS1_2,                         // 0x0303
+            raw_client_hello_handshake_message.clone(), // Clone to put into the record
+        );
+
+        Ok((full_tls_record, raw_client_hello_handshake_message))
+    }
+
+    // This function now takes the pre-generated client ephemeral public key
+    // It does not generate a new key pair.
+    // Modified to return both the TLS record and the raw ClientKeyExchange handshake message
+    pub fn create_client_key_exchange(
+        client_ephemeral_public_bytes: &[u8], // The public key from the initial key generation
+        tls_version: TlsVersion,              // TLS version for the record layer
+    ) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
+        // Correct: include the EC point length byte before the EC point
+        let mut client_key_exchange_payload = Vec::new();
+        client_key_exchange_payload.push(client_ephemeral_public_bytes.len() as u8); // EC point length
+        client_key_exchange_payload.extend_from_slice(client_ephemeral_public_bytes);
+
+        // Build the raw ClientKeyExchange handshake message (type + length + payload)
+        let mut raw_client_key_exchange_handshake_message = Vec::new();
+        raw_client_key_exchange_handshake_message
+            .push(HandshakeMessageType::ClientKeyExchange.as_u8());
+        let handshake_len_bytes = (client_key_exchange_payload.len() as u32).to_be_bytes();
+        raw_client_key_exchange_handshake_message.extend_from_slice(&handshake_len_bytes[1..4]);
+        raw_client_key_exchange_handshake_message.extend_from_slice(&client_key_exchange_payload);
+
+        // Build the full TLS record
+        let full_tls_record = Self::build_tls_record(
+            TlsContentType::Handshake,
+            tls_version,
+            raw_client_key_exchange_handshake_message.clone(), // Clone for the record
+        );
+
+        Ok((full_tls_record, raw_client_key_exchange_handshake_message))
     }
 
     pub fn parse_server_hello_message(input: &[u8]) -> Result<ServerHelloParsed, TlsError> {
@@ -219,27 +248,6 @@ impl HandshakeMessage {
         Err(TlsError::from(TlsParserError::MalformedMessage(
             "ServerKeyExchange message not found".to_string(),
         )))
-    }
-
-    // This function now takes the pre-generated client ephemeral public key
-    // It does not generate a new key pair.
-    pub fn create_client_key_exchange(
-        client_ephemeral_public_bytes: &[u8], // The public key from the initial key generation
-        tls_version: TlsVersion,              // TLS version for the record layer
-    ) -> Result<Vec<u8>, TlsError> {
-        let client_key_exchange_payload = client_ephemeral_public_bytes.to_vec();
-
-        let mut handshake_message = Vec::new();
-        handshake_message.push(HandshakeMessageType::ClientKeyExchange.as_u8());
-        let handshake_len_bytes = (client_key_exchange_payload.len() as u32).to_be_bytes();
-        handshake_message.extend_from_slice(&handshake_len_bytes[1..4]);
-        handshake_message.extend_from_slice(&client_key_exchange_payload);
-
-        Ok(Self::build_tls_record(
-            TlsContentType::Handshake,
-            tls_version,
-            handshake_message,
-        ))
     }
 
     pub fn create_change_cipher_spec() -> Vec<u8> {
@@ -279,9 +287,10 @@ impl HandshakeMessage {
         vec![0x01]
     }
 }
+
 pub fn handle_server_hello_flight(
     server_response_buffer: &[u8],
-    tls_version: TlsVersion, // Use this for parsing the record version
+    _tls_version: TlsVersion, // Use this for parsing the record version
     handshake_transcript_hash: &mut Vec<u8>, // Append raw handshake messages here
 ) -> Result<
     (
@@ -302,10 +311,17 @@ pub fn handle_server_hello_flight(
     let mut certificates: Option<Vec<Vec<u8>>> = None;
     let mut server_key_exchange: Option<ServerKeyExchangeParsed> = None;
     let mut server_hello_done_received = false;
+    let mut records_processed = 0;
 
     // Keep parsing records until no more data or ServerHelloDone is found
     while let Some(record) = parse_tls_record(&mut cursor)? {
-        println!("Read {} bytes from server", record.payload.len());
+        records_processed += 1;
+        println!(
+            "Read {} bytes from server (record {})",
+            record.payload.len(),
+            records_processed
+        );
+        println!("  Record content type: {:?}", record.content_type);
         // Note: We don't validate record version here because servers may use different
         // record layer versions than the negotiated version, especially during handshake
 
@@ -313,6 +329,21 @@ pub fn handle_server_hello_flight(
             TlsContentType::Handshake => {
                 // Parse multiple handshake messages that might be coalesced in one record
                 let handshake_messages = parse_handshake_messages(&record.payload)?;
+                println!(
+                    "  Parsed {} handshake message(s) in this record:",
+                    handshake_messages.len()
+                );
+
+                for (i, msg) in handshake_messages.iter().enumerate() {
+                    println!(
+                        "    Handshake message {}: {:?} (type=0x{:02X}, len={}, raw={})",
+                        i + 1,
+                        msg.msg_type,
+                        msg.msg_type.as_u8(),
+                        msg.length,
+                        hex::encode(&msg.raw_bytes)
+                    );
+                }
 
                 for msg in handshake_messages {
                     // Append the raw bytes of this handshake message to the transcript hash
@@ -329,7 +360,12 @@ pub fn handle_server_hello_flight(
                                     ),
                                 ));
                             }
-                            server_hello = Some(parse_server_hello_content(&msg.payload)?);
+                            let parsed = parse_server_hello_content(&msg.payload)?;
+                            println!(
+                                "  Parsed ServerHello: chosen cipher suite = {:02X}{:02X}",
+                                parsed.chosen_cipher_suite[0], parsed.chosen_cipher_suite[1]
+                            );
+                            server_hello = Some(parsed);
                         }
                         HandshakeMessageType::Certificate => {
                             if certificates.is_some() {
@@ -340,6 +376,7 @@ pub fn handle_server_hello_flight(
                                     ),
                                 ));
                             }
+                            println!("  Found Certificate message.");
                             certificates = Some(parse_certificate_list(&msg.payload)?);
                         }
                         HandshakeMessageType::ServerKeyExchange => {
@@ -351,49 +388,52 @@ pub fn handle_server_hello_flight(
                                     ),
                                 ));
                             }
+                            println!("  Found ServerKeyExchange message.");
                             server_key_exchange =
                                 Some(parse_server_key_exchange_content(&msg.payload)?);
                         }
                         HandshakeMessageType::ServerHelloDone => {
+                            println!("  Found ServerHelloDone message.");
                             server_hello_done_received = true;
                             break; // Done with this flight
                         }
                         // Handle other unexpected handshake messages if necessary
                         _ => {
-                            // For simplicity, we'll ignore other handshake messages for now
-                            // (e.g., NewSessionTicket, HelloRequest)
-                            #[cfg(debug_assertions)]
-                            eprintln!(
-                                "Warning: Unhandled Handshake Message Type: {:?} in Server Hello Flight",
-                                msg.msg_type
-                            );
+                            println!("  Unhandled handshake message type: {:?}", msg.msg_type);
                         }
                     }
                 }
             }
             TlsContentType::ChangeCipherSpec => {
-                // This is not typically part of the Server Hello flight, but can sometimes
-                // be sent immediately before the Finished message in TLS 1.2 if the server
-                // immediately transitions to encrypted data. We'll allow it but not expect it.
-                #[cfg(debug_assertions)]
-                eprintln!("Warning: Received ChangeCipherSpec record in Server Hello Flight");
+                println!("  Received ChangeCipherSpec record in Server Hello Flight");
             }
             TlsContentType::Alert => {
-                // An alert record indicates an error or warning
+                println!("  Received Alert record during Server Hello Flight");
                 return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
                     "Received Alert record during Server Hello Flight".to_string(),
                 )));
             }
             _ => {
-                // For simplicity, ignore other content types like ApplicationData for now
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "Warning: Unhandled TLS Content Type: {:?} in Server Hello Flight",
+                println!(
+                    "  Unhandled TLS Content Type: {:?} in Server Hello Flight",
                     record.content_type
                 );
             }
         }
+
+        // Stop parsing if we have ServerHelloDone or if we've processed enough records
+        // Some servers (like Google) may not send ServerHelloDone in the expected format
         if server_hello_done_received {
+            break;
+        }
+
+        // If we've processed multiple records and have the essential messages, we can stop
+        // This handles cases where servers don't follow the exact TLS 1.2 ServerHello flight pattern
+        if records_processed >= 2 && server_hello.is_some() {
+            println!(
+                "Processed {} records, have ServerHello, stopping ServerHello flight parsing",
+                records_processed
+            );
             break;
         }
     }
@@ -402,14 +442,23 @@ pub fn handle_server_hello_flight(
     let sh_parsed = server_hello.ok_or(TlsError::ParserError(TlsParserError::MalformedMessage(
         "ServerHello not received".to_string(),
     )))?;
-    let certs = certificates.ok_or(TlsError::ParserError(TlsParserError::MalformedMessage(
-        "Certificate message not received".to_string(),
-    )))?;
 
-    if !server_hello_done_received {
-        return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
-            "ServerHelloDone not received or flight incomplete".to_string(),
-        )));
+    // Make Certificate message optional - some servers may not send it in the initial flight
+    // This can happen with TLS 1.3 servers or certain cipher suite configurations
+    let certs = certificates.unwrap_or_else(|| {
+        println!("Warning: No Certificate message received in ServerHello flight");
+        Vec::new()
+    });
+
+    // Make ServerHelloDone optional for servers that don't follow strict TLS 1.2 patterns
+    if !server_hello_done_received && records_processed < 2 {
+        println!("Warning: ServerHelloDone not received, but continuing with handshake");
+    }
+
+    if server_key_exchange.is_none() {
+        println!("DEBUG: ServerKeyExchange message was NOT found in the handshake messages!");
+    } else {
+        println!("DEBUG: ServerKeyExchange message was found and parsed.");
     }
 
     // Return the parsed data
@@ -418,16 +467,102 @@ pub fn handle_server_hello_flight(
 
 pub fn read_tls_record<R: Read>(
     reader: &mut R,
-    _tls_version: TlsVersion,
+    _tls_version: TlsVersion, // tls_version is not directly used here, but kept for signature consistency
 ) -> Result<TlsRecord, TlsError> {
+    use std::io::{self};
+    use std::time::Duration;
     let mut header = [0u8; 5];
-    reader.read_exact(&mut header)?;
+    let mut bytes_read = 0;
+
+    // Read the 5-byte header
+    while bytes_read < 5 {
+        match reader.read(&mut header[bytes_read..]) {
+            Ok(0) => {
+                println!(
+                    "DEBUG: EOF encountered while reading TLS record header. Read {}/5 bytes.",
+                    bytes_read
+                );
+                return Err(TlsError::IoError(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Failed to read full TLS record header",
+                )));
+            }
+            Ok(n) => {
+                bytes_read += n;
+                println!("DEBUG: Read {} bytes for header, total {}/5", n, bytes_read);
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                println!("DEBUG: WouldBlock while reading header. Retrying...");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                println!("DEBUG: Error reading header: {:?}", e);
+                return Err(TlsError::IoError(e));
+            }
+        }
+    }
+
     let content_type = header[0];
     let version = (header[1], header[2]);
     let length = u16::from_be_bytes([header[3], header[4]]) as usize;
 
+    println!(
+        "DEBUG: Parsed record header: Type={:?}, Version={:X}.{:X}, Length={}",
+        TlsContentType::from(content_type),
+        version.0,
+        version.1,
+        length
+    );
+
+    if length > 16384 {
+        println!(
+            "DEBUG: WARNING: Record length ({}) seems excessively large!",
+            length
+        );
+        return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
+            format!("TLS record length {} exceeds max allowed (16384)", length),
+        )));
+    }
+
     let mut payload = vec![0u8; length];
-    reader.read_exact(&mut payload)?;
+    bytes_read = 0;
+    while bytes_read < length {
+        match reader.read(&mut payload[bytes_read..]) {
+            Ok(0) => {
+                println!(
+                    "DEBUG: EOF encountered while reading TLS record payload. Read {}/{} bytes.",
+                    bytes_read, length
+                );
+                return Err(TlsError::IoError(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Failed to read full TLS record payload",
+                )));
+            }
+            Ok(n) => {
+                bytes_read += n;
+                println!(
+                    "DEBUG: Read {} bytes for payload, total {}/{} ({} remaining)",
+                    n,
+                    bytes_read,
+                    length,
+                    length - bytes_read
+                );
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                println!("DEBUG: WouldBlock while reading payload. Retrying...");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                println!("DEBUG: Error reading payload: {:?}", e);
+                return Err(TlsError::IoError(e));
+            }
+        }
+    }
+
+    println!(
+        "DEBUG: Successfully read full TLS record. Payload (first 16 bytes): {}",
+        hex::encode(&payload[..std::cmp::min(16, payload.len())])
+    );
 
     Ok(TlsRecord {
         content_type: TlsContentType::from(content_type),

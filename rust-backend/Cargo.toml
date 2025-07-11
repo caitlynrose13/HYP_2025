@@ -1,7 +1,7 @@
 [package]
 name = "rust-backend"
-version = "0.1.0"     # Or your desired version
-edition = "2024"      # Or your current Rust edition (e.g., "2021" or "2018")
+version = "0.1.0"
+edition = "2024"
 
 [dependencies]
 # Async runtime
@@ -21,13 +21,15 @@ dotenvy = "0.15"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+log = "0.4.27" # Keep log for the info! macro
 
 uuid = { version = "1", features = ["v4", "serde"] }
 tower-http = { version = "0.5", features = ["cors"] } #prevent CORS ERROR
 
 #tls dependencies
 rand = "0.8"
-p256 = { version = "0.13", features = ["ecdh"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] } # ADDED "ecdsa" feature
+rsa = { version = "0.9", features = ["sha2"] } # ADDED "pkcs1", "pkcs8", "sha2" features
 
 #certificate parsing
 x509-parser = "0.15"
@@ -48,3 +50,7 @@ elliptic-curve = "0.13.8"
 aes-gcm = "0.10"
 aes = "0.8"
 typenum = "1.17"
+der = "0.7.10"
+
+once_cell = "1.18"
+const-oid = "0.9"

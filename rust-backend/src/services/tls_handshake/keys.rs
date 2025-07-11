@@ -100,9 +100,6 @@ pub fn derive_aead_keys(
     cipher_suite: &CipherSuite,
     key_block: &[u8],
 ) -> Result<(AesGcm<Aes128, U12, U16>, AesGcm<Aes128, U12, U16>), TlsError> {
-    // <--- CORRECTED RETURN TYPE
-    // No need for `use typenum::U12;` here if already at module level
-
     let mac_len = cipher_suite.mac_key_length as usize;
     let key_len = cipher_suite.key_length as usize;
     let iv_len = cipher_suite.fixed_iv_length as usize;
@@ -134,9 +131,16 @@ pub fn derive_aead_keys(
 
     let _server_iv = &key_block[offset..offset + iv_len];
 
-    let client_cipher = AesGcm::<Aes128, U12, U16>::new(GenericArray::from_slice(client_key)); // <--- CORRECTED INSTANTIATION
-    let server_cipher = AesGcm::<Aes128, U12, U16>::new(GenericArray::from_slice(server_key)); // <--- CORRECTED INSTANTIATION
+    // Ensure client_key and server_key slices match the expected length for Aes128 (16 bytes)
+    if key_len != 16 {
+        return Err(TlsError::KeyDerivationError(format!(
+            "Expected key_len of 16 for Aes128, but got {}",
+            key_len
+        )));
+    }
 
+    let client_cipher = AesGcm::<Aes128, U12, U16>::new(GenericArray::from_slice(client_key));
+    let server_cipher = AesGcm::<Aes128, U12, U16>::new(GenericArray::from_slice(server_key));
     Ok((client_cipher, server_cipher))
 }
 
@@ -160,28 +164,73 @@ pub fn calculate_verify_data(
     Ok(verify_data.to_vec())
 }
 
+/// Like calculate_verify_data, but also returns the handshake_hash for debug logging
+pub fn calculate_verify_data_with_hash(
+    master_secret: &[u8],
+    handshake_messages: &[u8],
+    label: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), TlsError> {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(handshake_messages);
+    let handshake_hash = hasher.finalize();
+    let mut handshake_hash_arr = [0u8; 32];
+    handshake_hash_arr.copy_from_slice(&handshake_hash);
+
+    let mut seed = Vec::new();
+    seed.extend_from_slice(label);
+    seed.extend_from_slice(&handshake_hash_arr);
+
+    let mut verify_data = [0u8; 12];
+    prf_tls12(&master_secret, &seed, &mut verify_data).map_err(TlsError::KeyDerivationError)?;
+
+    Ok((verify_data.to_vec(), handshake_hash_arr))
+}
+
 pub fn encrypt_gcm_message(
     plaintext: &[u8],
-    key: &AesGcm<Aes128, U12, U16>, // <--- CORRECTED KEY TYPE
+    key: &AesGcm<Aes128, U12, U16>,
     fixed_iv: &[u8],
     sequence_number: u64,
     content_type: TlsContentType,
     tls_version: TlsVersion,
 ) -> Result<Vec<u8>, TlsError> {
+    // Nonce: 4 bytes fixed_iv || 8 bytes sequence_number (big-endian)
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes[..4].copy_from_slice(fixed_iv);
     nonce_bytes[4..].copy_from_slice(&sequence_number.to_be_bytes());
 
-    let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes); // Use GenericArray for nonce
-
-    let mut aad_bytes = Vec::new();
+    // Construct AAD: seq_num (8 bytes) || content_type (1 byte) || version (2 bytes) || length (2 bytes)
+    // For the length, we need to estimate it: plaintext length + 16 bytes for GCM tag
+    let estimated_encrypted_length = plaintext.len() + 16;
+    let mut aad_bytes = Vec::with_capacity(13);
     aad_bytes.extend_from_slice(&sequence_number.to_be_bytes());
     aad_bytes.push(content_type.as_u8());
     let (major, minor) = tls_version.to_u8_pair();
     aad_bytes.push(major);
     aad_bytes.push(minor);
-    aad_bytes.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
+    aad_bytes.extend_from_slice(&(estimated_encrypted_length as u16).to_be_bytes());
 
+    // Enhanced debug print
+    println!("=== GCM Encryption Debug ===");
+    println!("Plaintext (hex): {}", hex::encode(plaintext));
+    println!("Fixed IV (hex): {}", hex::encode(fixed_iv));
+    println!("Sequence number: {}", sequence_number);
+    println!("Content type: 0x{:02X}", content_type.as_u8());
+    println!("TLS version: 0x{:02X}{:02X}", major, minor);
+    println!("AEAD nonce (hex): {}", hex::encode(&nonce_bytes));
+    println!("AEAD AAD (hex): {}", hex::encode(&aad_bytes));
+    println!(
+        "Estimated encrypted length: {} (plaintext {} + 16)",
+        estimated_encrypted_length,
+        plaintext.len()
+    );
+    println!(
+        "AAD length field: 0x{:04X}",
+        estimated_encrypted_length as u16
+    );
+
+    // Encrypt once with AAD
+    let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes);
     let ciphertext_with_tag = key
         .encrypt(
             nonce,
@@ -192,13 +241,20 @@ pub fn encrypt_gcm_message(
         )
         .map_err(|_| TlsError::EncryptionError("AES-GCM encryption failed".into()))?;
 
+    println!(
+        "Final ciphertext (hex): {}",
+        hex::encode(&ciphertext_with_tag)
+    );
+    println!("Actual ciphertext length: {}", ciphertext_with_tag.len());
+    println!("=== End GCM Encryption Debug ===");
+
     Ok(ciphertext_with_tag)
 }
 
 /// Decrypts a TLS 1.2 GCM message payload.
 pub fn decrypt_gcm_message(
     ciphertext_with_tag: &[u8],
-    key: &AesGcm<Aes128, U12, U16>, // <--- CORRECTED KEY TYPE
+    key: &AesGcm<Aes128, U12, U16>,
     fixed_iv: &[u8],
     sequence_number: u64,
     content_type: TlsContentType,
@@ -210,20 +266,13 @@ pub fn decrypt_gcm_message(
 
     let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes);
 
-    let mut aad_bytes = Vec::new();
+    let mut aad_bytes = Vec::with_capacity(13);
     aad_bytes.extend_from_slice(&sequence_number.to_be_bytes());
     aad_bytes.push(content_type.as_u8());
     let (major, minor) = tls_version.to_u8_pair();
     aad_bytes.push(major);
     aad_bytes.push(minor);
-    let tag_len = 16;
-    if ciphertext_with_tag.len() < tag_len {
-        return Err(TlsError::DecryptionError(
-            "Ciphertext too short to contain tag".into(),
-        ));
-    }
-    let encrypted_data_len = (ciphertext_with_tag.len() - tag_len) as u16;
-    aad_bytes.extend_from_slice(&encrypted_data_len.to_be_bytes());
+    aad_bytes.extend_from_slice(&(ciphertext_with_tag.len() as u16 - 16).to_be_bytes());
 
     let plaintext = key
         .decrypt(
@@ -233,11 +282,7 @@ pub fn decrypt_gcm_message(
                 aad: &aad_bytes,
             },
         )
-        .map_err(|_| {
-            TlsError::DecryptionError(
-                "AES-GCM decryption failed or authentication tag invalid".into(),
-            )
-        })?;
+        .map_err(|_| TlsError::EncryptionError("AES-GCM decryption failed".into()))?;
 
     Ok(plaintext)
 }

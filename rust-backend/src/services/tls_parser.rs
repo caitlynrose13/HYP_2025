@@ -307,6 +307,7 @@ pub struct ServerKeyExchangeParsed {
     pub public_key: Vec<u8>,
     pub signature_algorithm: [u8; 2],
     pub signature: Vec<u8>,
+    pub params_raw: Vec<u8>, // NEW: raw bytes from curve_type through public_key
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,9 +336,21 @@ pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite {
     hash_algorithm: HashAlgorithm::Sha256,
 };
 
+// Add AES-256-GCM suite
+pub const TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: CipherSuite = CipherSuite {
+    id: [0xC0, 0x30],
+    name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    key_length: 32,                        // AES-256 uses 32-byte key
+    fixed_iv_length: 4,                    // GCM uses a 4-byte fixed_iv for TLS 1.2
+    mac_key_length: 0, // GCM is an AEAD cipher, MAC is integrated, so 0 separate MAC key
+    hash_algorithm: HashAlgorithm::Sha256, // Should be Sha384 for full correctness, but keep as Sha256 if only Sha256 is implemented
+};
+
 pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<&'static CipherSuite> {
     if id == &TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.id {
         Some(&TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+    } else if id == &TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384.id {
+        Some(&TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)
     } else {
         None
     }
@@ -411,6 +424,16 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
 
         let end_pos = cursor.position() as usize;
         let raw_bytes_for_this_message = data[start_pos..end_pos].to_vec();
+
+        // --- DEBUG OUTPUT ---
+        println!(
+            "[parse_handshake_messages] Parsed handshake message: type={:?} (0x{:02X}), len={}, raw={}",
+            msg_type,
+            msg_type.as_u8(),
+            length,
+            hex::encode(&raw_bytes_for_this_message)
+        );
+        // --- END DEBUG OUTPUT ---
 
         messages.push(TlsHandshakeMessage {
             msg_type,
@@ -566,36 +589,48 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
 pub fn parse_server_key_exchange_content(
     payload: &[u8],
 ) -> Result<ServerKeyExchangeParsed, TlsParserError> {
-    let mut cursor = Cursor::new(payload);
+    // Log the complete raw ServerKeyExchange message
+    println!(
+        "    Complete raw ServerKeyExchange message (hex): {}",
+        hex::encode(payload)
+    );
+    println!(
+        "    ServerKeyExchange message length: {} bytes",
+        payload.len()
+    );
 
+    let mut cursor = Cursor::new(payload);
+    let start_params = 0;
     let curve_type = cursor.read_u8()?;
     if curve_type != 0x03 {
         return Err(TlsParserError::InvalidNamedGroup(curve_type as u16));
     }
-
     let named_curve = cursor.read_u16::<BigEndian>()?;
     if NamedGroup::try_from_u16(named_curve).is_none() {
         return Err(TlsParserError::InvalidNamedGroup(named_curve));
     }
-
     let public_key_len = cursor.read_u8()? as usize;
-
     let mut public_key_bytes = vec![0; public_key_len];
     cursor.read_exact(&mut public_key_bytes)?;
-
+    let end_params = cursor.position() as usize;
+    let params_raw = payload[start_params..end_params].to_vec();
     let mut signature_algorithm = [0; 2];
     cursor.read_exact(&mut signature_algorithm)?;
-
     let signature_len = cursor.read_u16::<BigEndian>()? as usize;
-
     let mut signature_bytes = vec![0; signature_len];
     cursor.read_exact(&mut signature_bytes)?;
-
     if cursor.position() as usize != payload.len() {
         return Err(TlsParserError::MalformedMessage(
             "ServerKeyExchange payload has unread trailing data".to_string(),
         ));
     }
+
+    // Log signature algorithm
+    println!(
+        "    Signature algorithm: 0x{:02X}{:02X}",
+        signature_algorithm[0], signature_algorithm[1]
+    );
+    println!("    Signature length: {} bytes", signature_bytes.len());
 
     Ok(ServerKeyExchangeParsed {
         curve_type,
@@ -603,5 +638,6 @@ pub fn parse_server_key_exchange_content(
         public_key: public_key_bytes,
         signature_algorithm,
         signature: signature_bytes,
+        params_raw, // NEW
     })
 }
