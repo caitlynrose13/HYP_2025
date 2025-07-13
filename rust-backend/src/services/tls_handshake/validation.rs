@@ -1,25 +1,19 @@
-// src/services/tls_handshake/validation.rs
-
+use crate::services::errors::TlsError;
+use crate::services::tls_parser::ServerKeyExchangeParsed;
 use const_oid::ObjectIdentifier as Oid;
 use p256::EncodedPoint;
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier as EcVerifier};
 use rsa::RsaPublicKey;
-use sha2::{Digest, Sha256, Sha512};
-use x509_parser::prelude::{FromDer, X509Certificate};
-
 use rsa::pkcs1::DecodeRsaPublicKey as DecodeRsaPkcs1PublicKey;
 use rsa::pkcs1v15::Signature as RsaPkcs1v15Signature;
 use rsa::pkcs1v15::VerifyingKey as RsaPkcs1v15VerifyingKey;
 use rsa::pkcs8::DecodePublicKey as DecodeRsaPkcs8PublicKey;
-
 use rsa::sha2::Sha256 as RsaSha256;
+use sha2::{Digest, Sha256};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::services::errors::TlsError;
-use crate::services::tls_parser::ServerKeyExchangeParsed;
-
-use log::info;
 use once_cell::sync::Lazy;
-use std::string::ToString; // Ensure ToString trait is in scope for .to_string()
+use std::string::ToString;
 
 // Define OID constants as static Lazy values
 pub static OID_RSA_ENCRYPTION: Lazy<Oid> = Lazy::new(|| Oid::new_unwrap("1.2.840.113549.1.1.1"));
@@ -31,11 +25,8 @@ pub fn verify_server_key_exchange_signature(
     server_random: &[u8; 32],
     cert_chain: &[Vec<u8>],
 ) -> Result<(), TlsError> {
-    info!("    Attempting to verify ServerKeyExchange signature...");
-
-    // Handle empty certificate chain - some servers may not send certificates in the initial flight
+    // Handle empty certificate chain
     if cert_chain.is_empty() {
-        info!("    Warning: Empty certificate chain provided, skipping signature verification");
         return Ok(());
     }
 
@@ -49,51 +40,17 @@ pub fn verify_server_key_exchange_signature(
     let spki = &cert.tbs_certificate.subject_pki;
     let spki_bytes_data = spki.subject_public_key.data.as_ref();
 
-    let alg_oid_from_cert = &spki.algorithm.algorithm; // This is &Oid<'_>
+    let alg_oid_from_cert = &spki.algorithm.algorithm;
 
-    // **** CRITICAL FIX: Convert OIDs to String for comparison ****
-    // This bypasses the PartialEq/AsRef<[u8]> issues between the different Oid contexts.
+    // Convert OIDs to String for comparison
     let is_rsa = alg_oid_from_cert.to_string() == OID_RSA_ENCRYPTION.to_string();
     let is_ec = alg_oid_from_cert.to_string() == OID_EC_PUBLIC_KEY.to_string();
-
-    // --- ADD THESE LOGGING STATEMENTS ---
-    info!("    Client Random: {:?}", client_random);
-    info!("    Server Random: {:?}", server_random);
-    info!("    SKE Curve Type: {:02X}", ske.curve_type);
-    info!("    SKE Named Curve: {:04X}", ske.named_curve as u16);
-    info!("    SKE Public Key Length: {}", ske.public_key.len());
-    info!(
-        "    SKE Public Key (first 16 bytes): {:?}",
-        &ske.public_key[..std::cmp::min(16, ske.public_key.len())]
-    );
-    if ske.public_key.len() > 16 {
-        info!(
-            "    SKE Public Key (remaining bytes): {:?}",
-            &ske.public_key[16..]
-        );
-    }
-    // --- END ADDED LOGGING ---
 
     // Concatenate all raw data for hashing
     let mut data_to_be_hashed = Vec::new();
     data_to_be_hashed.extend_from_slice(client_random);
     data_to_be_hashed.extend_from_slice(server_random);
     data_to_be_hashed.extend_from_slice(&ske.params_raw);
-    info!(
-        "    Raw data to be hashed (hex): {}",
-        hex::encode(&data_to_be_hashed)
-    );
-
-    // For debugging/logging purposes, calculate what the hash *should* be for SHA512
-    let mut hasher_for_log = Sha512::new();
-    hasher_for_log.update(&data_to_be_hashed);
-    let expected_message_hash_for_log = hasher_for_log.finalize();
-
-    info!(
-        "    Calculated message hash (SHA512 for log): {:?}",
-        expected_message_hash_for_log
-    );
-    info!("    Server signature received: {:?}", ske.signature);
 
     if is_ec {
         // EC Public Key (P-256)
@@ -120,7 +77,7 @@ pub fn verify_server_key_exchange_signature(
         let signature = Signature::from_slice(&ske.signature)
             .map_err(|e| TlsError::HandshakeFailed(format!("Invalid signature format: {:?}", e)))?;
 
-        // For ECDSA, we need to hash the data ourselves since we pass the hash to verify
+        // For ECDSA
         let mut ec_hasher = Sha256::new();
         ec_hasher.update(&data_to_be_hashed);
         let ec_message_hash = ec_hasher.finalize();
@@ -129,7 +86,6 @@ pub fn verify_server_key_exchange_signature(
             |e| TlsError::HandshakeFailed(format!("Signature verification failed: {:?}", e)),
         )?;
 
-        info!("    ServerKeyExchange signature successfully verified (EC)!");
         Ok(())
     } else if is_rsa {
         // RSA public key
@@ -139,15 +95,8 @@ pub fn verify_server_key_exchange_signature(
                 TlsError::CertificateError(format!("Failed to parse RSA public key: {:?}", e))
             })?;
 
-        // Support common signature algorithms
-        info!(
-            "    Detected signature algorithm: 0x{:02X}{:02X}",
-            ske.signature_algorithm[0], ske.signature_algorithm[1]
-        );
-
         match ske.signature_algorithm {
             [0x04, 0x01] => {
-                info!("    Using RSA/SHA256 verification");
                 // rsa_pkcs1_sha256
                 let rsa_verifying_key = RsaPkcs1v15VerifyingKey::<RsaSha256>::new(rsa_pub);
                 let rsa_signature = RsaPkcs1v15Signature::try_from(ske.signature.as_slice())
@@ -163,11 +112,9 @@ pub fn verify_server_key_exchange_signature(
                             e
                         ))
                     })?;
-                info!("    ServerKeyExchange signature successfully verified (RSA/SHA256)!");
-                Ok(()) // <--- Each successful arm MUST return Ok(())
+                Ok(())
             }
             [0x05, 0x01] => {
-                info!("    Using RSA/SHA384 verification");
                 // rsa_pkcs1_sha384
                 let rsa_verifying_key = RsaPkcs1v15VerifyingKey::<sha2::Sha384>::new(rsa_pub);
                 let rsa_signature = RsaPkcs1v15Signature::try_from(ske.signature.as_slice())
@@ -183,11 +130,9 @@ pub fn verify_server_key_exchange_signature(
                             e
                         ))
                     })?;
-                info!("    ServerKeyExchange signature successfully verified (RSA/SHA384)!");
-                Ok(()) // <--- Each successful arm MUST return Ok(())
+                Ok(())
             }
             [0x06, 0x01] => {
-                info!("    Using RSA/SHA512 verification");
                 // rsa_pkcs1_sha512
                 let rsa_verifying_key = RsaPkcs1v15VerifyingKey::<sha2::Sha512>::new(rsa_pub);
                 let rsa_signature = RsaPkcs1v15Signature::try_from(ske.signature.as_slice())
@@ -203,7 +148,6 @@ pub fn verify_server_key_exchange_signature(
                             e
                         ))
                     })?;
-                info!("    ServerKeyExchange signature successfully verified (RSA/SHA512)!");
                 Ok(())
             }
             _ => {
