@@ -43,68 +43,136 @@
 
 <style>
   .grade-card {
-    margin-top: 1rem;
-    padding: 1rem;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    background-color: #fff;
-    font-size: 0.95rem;
-    color: #333;
+    margin-top: 1.5rem;
+    padding: 1.5rem 1rem 1.5rem 1rem;
+    border: 1.5px solid var(--border-color);
+    border-radius: 12px;
+    background-color: var(--card-background-color);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+    color: var(--text-color);
+    transition:
+      background-color 0.3s,
+      color 0.3s,
+      border-color 0.3s,
+      box-shadow 0.2s;
+    max-width: 420px;
+    margin-left: auto;
+    margin-right: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
   }
-
+  .grade-card:hover {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+    border-color: var(--button-bg-color);
+  }
   .grade-card h2 {
-    color: #222;
+    color: var(--text-color);
     margin-top: 0;
-    margin-bottom: 1rem;
+    margin-bottom: 1.2rem;
     text-align: center;
+    font-size: 1.3rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
   }
-
   .grade-section {
     text-align: center;
-    margin-bottom: 1rem;
+    margin-bottom: 1.5rem;
   }
-
   .label {
-    font-weight: bold;
-    margin-bottom: 0.4rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    font-size: 1.05rem;
+    color: var(--text-color);
   }
-
   .icon-grade {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 0.5rem;
-    font-size: 2rem;
+    gap: 0.7rem;
+    font-size: 2.8rem;
+    margin-bottom: 0.3rem;
   }
-
+  .icon-grade .lock-icon {
+    border-radius: 50%;
+    border: 2.5px solid var(--button-bg-color);
+    background: var(--background-color);
+    padding: 0.25em 0.35em;
+    font-size: 2.2rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    margin-right: 0.3em;
+  }
+  .icon-grade .grade {
+    font-size: 2.2rem;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    color: var(--accent-color-green);
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  }
   .summary {
     margin-top: 0.5rem;
-    color: #444;
+    color: var(--text-color);
+    font-size: 1.08rem;
+    font-weight: 500;
   }
-
   .details {
-    background: #f8f8f8;
-    padding: 0.75rem;
-    border-radius: 4px;
-    margin: 1rem 0;
+    background: color-mix(
+      in srgb,
+      var(--card-background-color) 90%,
+      var(--background-color) 10%
+    );
+    /* fallback for browsers without color-mix: */
+    background: rgba(0, 0, 0, 0.03);
+    border-radius: 8px;
+    padding: 1.1rem 1rem 1.1rem 1rem;
+    margin: 1.2rem 0 1.2rem 0;
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
-
   .details div {
-    margin: 0.4rem 0;
+    margin: 0.2rem 0;
+    font-size: 1.01rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
-
+  .details strong {
+    font-weight: 600;
+    color: var(--text-color);
+    min-width: 110px;
+    display: inline-block;
+  }
   .details-button {
     width: 100%;
-    padding: 0.6rem;
-    font-size: 1rem;
-    background-color: #1976d2;
-    color: white;
+    padding: 0.9rem 0;
+    font-size: 1.08rem;
+    font-weight: 700;
+    background-color: var(--button-bg-color);
+    color: var(--button-text-color);
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
+    margin-top: 0.7rem;
+    transition:
+      background-color 0.2s,
+      box-shadow 0.2s;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    letter-spacing: 0.01em;
   }
-
   .details-button:hover {
-    background-color: #125ea8;
+    background-color: var(--button-hover-bg-color);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  }
+  @media (max-width: 480px) {
+    .grade-card {
+      padding: 1rem 0.3rem 1rem 0.3rem;
+    }
+    .details {
+      padding: 0.8rem 0.3rem 0.8rem 0.3rem;
+    }
   }
 </style>

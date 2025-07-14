@@ -18,7 +18,19 @@
   let loading: boolean = false;
   let analysisInitiated: boolean = false;
 
-  let fullDetailedReport: TlsReportData | null = null; // Initialize as null
+  let tlsReportData: any = null;
+
+  // Calculate days until certificate expiry
+  $: certExpiryDays = (() => {
+    if (tlsReportData && tlsReportData.cert_valid_to) {
+      const expiry = new Date(tlsReportData.cert_valid_to);
+      const now = new Date();
+      const diffMs = expiry.getTime() - now.getTime();
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      return diffDays;
+    }
+    return null;
+  })();
 
   interface TlsReportData {
     domain: string;
@@ -40,28 +52,28 @@
     loading = true;
     result = "";
     error = "";
+    tlsReportData = null;
 
     try {
-      console.log(" Sending domain to backend:", domainToAssess);
-
+      console.log("About to start fetch...");
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 5000); // 5 seconds
       const res = await fetch("http://127.0.0.1:8080/assess", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ domain: domainToAssess }),
+        signal: controller.signal,
       });
-
+      console.log("Fetch returned, status:", res.status);
       if (!res.ok) {
         const errorText = await res.text();
         throw new Error(`HTTP error! Status: ${res.status} - ${errorText}`);
       }
 
       const json = await res.json();
-      if (json && json.domain && json.message) {
-        result = `${json.domain}: ${json.message}`;
-      } else {
-        result = "Analysis complete, but response format was unexpected.";
-        console.warn("[assess] Unexpected response format:", json);
-      }
+      console.log("[assess] JSON response:", json);
+      tlsReportData = json; // Store the full response
+      result = "Analysis complete.";
     } catch (err: any) {
       console.error("[assess] Fetch error:", err);
       error = `Failed to connect to backend or invalid response: ${err.message || err}`;
@@ -91,26 +103,7 @@
   }
 
   function goToReport() {
-    fullDetailedReport = {
-      domain,
-      certificate: {
-        issuer: "Let's Encrypt",
-        validFrom: "2024-01-01",
-        validTo: "2025-03-30",
-        keySize: "2048-bit",
-        commonName: domain,
-      },
-      protocols: {
-        "TLS 1.3": "✅ Supported",
-        "TLS 1.2": "✅ Supported",
-        "TLS 1.0": "❌ Deprecated",
-      },
-      vulnerabilities: {
-        Heartbleed: "Not vulnerable",
-        POODLE: "Not vulnerable",
-      },
-    };
-
+    if (!tlsReportData) return;
     currentView.set("detailedReport");
   }
 </script>
@@ -151,15 +144,14 @@
       <div class="results-area">
         {#if loading && !result && !error}
           <p>Loading analysis for {domain}...</p>
-        {:else if result}
-          <!--HARDCODED FOR NOW-->
+        {:else if tlsReportData}
           <GradeCard
-            grade="A+"
-            summary="Secure Connection"
-            tlsProtocol="TLS 1.3"
-            certValid={true}
-            certIssuer="Let's Encrypt"
-            certExpiryDays={90}
+            grade="A"
+            summary={tlsReportData.message}
+            tlsProtocol={tlsReportData.tls_version}
+            certValid={tlsReportData.cert_chain_trust === "Trusted"}
+            certIssuer={tlsReportData.cert_issuer}
+            certExpiryDays={certExpiryDays ?? 0}
             onViewDetailedReport={goToReport}
           />
         {:else if error}
@@ -170,14 +162,8 @@
   {:else if $currentView === "settings"}
     <SettingsPage onGoBack={goToHome} />
   {:else if $currentView === "detailedReport"}
-    {#if fullDetailedReport}
-      <DetailedReport
-        handleGoBack={goToHome}
-        domain={fullDetailedReport.domain}
-        certificate={fullDetailedReport.certificate}
-        protocols={fullDetailedReport.protocols}
-        vulnerabilities={fullDetailedReport.vulnerabilities}
-      />
+    {#if tlsReportData}
+      <DetailedReport handleGoBack={goToHome} {tlsReportData} />
     {/if}
   {/if}
 </main>

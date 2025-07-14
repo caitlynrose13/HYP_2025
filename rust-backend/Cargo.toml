@@ -54,3 +54,4 @@ der = "0.7.10"
 
 once_cell = "1.18"
 const-oid = "0.9"
+hyper = "0.14"
