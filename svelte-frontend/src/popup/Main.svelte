@@ -146,7 +146,7 @@
           <p>Loading analysis for {domain}...</p>
         {:else if tlsReportData}
           <GradeCard
-            grade="A"
+            grade={tlsReportData.grade ?? "?"}
             summary={tlsReportData.message}
             tlsProtocol={tlsReportData.tls_version}
             certValid={tlsReportData.cert_chain_trust === "Trusted"}

@@ -9,13 +9,25 @@
   export let onViewDetailedReport: () => void;
 
   //get colour from grade
-  const gradeColour = {
-    A: "green",
-    B: "yellow",
-    C: "orange",
-    D: "red",
-    F: "darkred",
-  }[grade];
+  const gradeColour =
+    {
+      APlus: "green",
+      A: "green",
+      AMinus: "yellowgreen",
+      B: "yellow",
+      C: "orange",
+      F: "darkred",
+    }[grade] || "gray";
+
+  const gradeDisplay =
+    {
+      APlus: "A+",
+      A: "A",
+      AMinus: "A-",
+      B: "B",
+      C: "C",
+      F: "F",
+    }[grade] || grade;
 </script>
 
 <div class="grade-card">
@@ -24,7 +36,7 @@
     <div class="label">Overall Rating</div>
     <div class="icon-grade">
       <span class="lock-icon" style="color: {gradeColour}">🔒</span>
-      <span class="grade" style="color: {gradeColour}">{grade}</span>
+      <span class="grade" style="color: {gradeColour}">{gradeDisplay}</span>
     </div>
     <div class="summary">{summary}</div>
   </div>

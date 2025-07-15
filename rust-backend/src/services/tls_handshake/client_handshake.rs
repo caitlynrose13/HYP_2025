@@ -111,7 +111,7 @@ pub fn perform_tls_handshake_full_with_cert(
 ) -> Result<(TlsConnectionState, Option<Vec<u8>>), TlsError> {
     // Use the provided domain parameter
     let domain = domain;
-    let port = 1012; // Use port 1012 for the test server
+    let port = 443;
     let addr_str = format!("{}:{}", domain, port);
     let mut addrs_iter = addr_str
         .to_socket_addrs()
