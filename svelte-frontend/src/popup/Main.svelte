@@ -110,6 +110,73 @@
 
 <!--Main UI-->
 <main>
+  <style>
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: var(--header-bg-color);
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 1.35em;
+      color: var(--text-color);
+      font-weight: 700;
+      text-align: center;
+      flex-grow: 1;
+    }
+    .main-content {
+      padding: 24px 10px 32px 10px;
+      min-height: 70vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+    }
+    .security-overview-heading {
+      font-size: 1.18em;
+      font-weight: 700;
+      margin: 0 0 1em 0;
+      color: var(--text-color);
+      text-align: left;
+      letter-spacing: 0.5px;
+    }
+    .menu-button {
+      background: none;
+      border: none;
+      color: var(--text-color);
+      font-size: 1.3em;
+      cursor: pointer;
+      padding: 0;
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      outline: none;
+      transition: color 0.2s;
+    }
+    .menu-button:hover,
+    .menu-button:focus {
+      opacity: 0.7;
+      color: var(--button-bg-color);
+      outline: none;
+    }
+    .input-section {
+      display: flex;
+      padding: 10px;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-color);
+      background-color: var(--card-background-color);
+    }
+    .results-area {
+      flex-grow: 1;
+      padding: 10px;
+      background-color: var(--card-background-color);
+      overflow-y: visible;
+    }
+  </style>
   {#if $currentView === "home"}
     <header class="header">
       <h1>SSL/TLS Analyser</h1>

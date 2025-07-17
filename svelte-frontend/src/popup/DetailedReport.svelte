@@ -6,6 +6,18 @@
   // Extract fields for display
   $: cert = tlsReportData || {};
 
+  // Helper to format date string to 'DD Mon YYYY'
+  function formatDate(dateStr: string): string {
+    if (!dateStr) return "";
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr.split(" ")[0];
+    return d.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  }
+
   // Helper function to determine icon and display text for protocol status
   function getProtocolStatusDisplay(status: string): {
     icon: string;
@@ -40,11 +52,14 @@
       <tbody>
         <tr><td>Common Name:</td><td>{cert.cert_common_name}</td></tr>
         <tr><td>Issuer:</td><td>{cert.cert_issuer}</td></tr>
-        <tr
-          ><td>Valid From and To:</td><td
-            >{cert.cert_valid_from} - {cert.cert_valid_to}</td
-          ></tr
-        >
+        <tr>
+          <td>Valid From and To:</td>
+          <td
+            >{formatDate(cert.cert_valid_from)} - {formatDate(
+              cert.cert_valid_to,
+            )}</td
+          >
+        </tr>
         <tr><td>Chain Trust:</td><td>{cert.cert_chain_trust}</td></tr>
       </tbody>
     </table>
@@ -96,10 +111,11 @@
   }
   .report-header h1 {
     margin: 0;
-    font-size: 1.2em;
+    font-size: 1.35em;
     color: var(--text-color);
     flex-grow: 1;
     text-align: center;
+    font-weight: 700;
   }
   .back-button {
     background: none;

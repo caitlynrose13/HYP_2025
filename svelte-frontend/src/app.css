@@ -1,13 +1,32 @@
 /* Base global styling for extension */
 body {
   width: 350px;
-  height: 500px;
+  height: 570px;
+  /* increased height for more space */
   margin: 0;
   font-family: Arial, Helvetica, sans-serif;
   overflow: hidden;
   background-color: var(--background-color);
   color: var(--text-color);
   transition: background-color 0.3s, color 0.3s;
+}
+
+.settings-page {
+  width: 350px;
+  height: 570px;
+  min-height: unset;
+  max-width: unset;
+  overflow: hidden;
+}
+
+.report-container {
+  width: 350px;
+  height: 570px;
+  min-height: unset;
+  max-width: unset;
+  margin: 0 auto;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 
 /* LIGHT MODE (default) */
@@ -48,13 +67,15 @@ body {
   justify-content: space-between;
   align-items: center;
   background-color: var(--header-bg-color);
-  padding: 10px 15px;
+  padding: 8px 10px;
+  /* reduced padding */
   border-bottom: 1px solid var(--border-color);
 }
 
 .header h1 {
   margin: 0;
-  font-size: 1.2em;
+  font-size: 1em;
+  /* reduced font size */
   color: var(--text-color);
 }
 
@@ -78,8 +99,9 @@ body {
 /* Input section */
 .input-section {
   display: flex;
-  padding: 15px;
-  gap: 10px;
+  padding: 10px;
+  /* reduced padding */
+  gap: 8px;
   border-bottom: 1px solid var(--border-color);
   background-color: var(--card-background-color);
 }
@@ -88,9 +110,11 @@ input[type="text"] {
   border: 1px solid var(--input-border-color);
   background-color: var(--card-background-color);
   color: var(--text-color);
-  padding: 8px 10px;
+  padding: 6px 8px;
+  /* reduced padding */
   border-radius: 4px;
-  font-size: 0.95em;
+  font-size: 0.9em;
+  /* reduced font size */
   width: 100%;
   transition: border-color 0.2s, background-color 0.2s, color 0.2s;
 }
@@ -105,12 +129,13 @@ input[type="text"]::placeholder {
 }
 
 .analyse-button {
-  font-size: 0.95em;
+  font-size: 0.9em;
   white-space: nowrap;
   background-color: var(--button-bg-color);
   color: var(--button-text-color);
   border: none;
-  padding: 8px 14px;
+  padding: 6px 10px;
+  /* reduced padding */
   border-radius: 4px;
   cursor: pointer;
   transition: background-color 0.2s;
@@ -128,9 +153,11 @@ input[type="text"]::placeholder {
 /* Results */
 .results-area {
   flex-grow: 1;
-  padding: 15px;
+  padding: 10px;
+  /* reduced padding */
   background-color: var(--card-background-color);
-  overflow-y: auto;
+  overflow-y: visible;
+  /* no scroll on main page */
 }
 
 .results-area p {
@@ -153,8 +180,9 @@ input[type="text"]::placeholder {
   border: 1px solid var(--border-color);
   border-radius: 6px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  margin-bottom: 1rem;
-  padding: 1rem;
+  margin-bottom: 0.5rem;
+  padding: 0.7rem;
+  /* reduced padding */
   color: var(--text-color);
   transition: background-color 0.3s, color 0.3s, border-color 0.3s;
 }
@@ -179,4 +207,15 @@ body::-webkit-scrollbar-thumb,
 .report-container::-webkit-scrollbar-thumb {
   background: var(--border-color);
   border-radius: 4px;
+}
+
+/* Remove scrollbar for main page */
+body,
+.results-area {
+  scrollbar-width: none;
+}
+
+body::-webkit-scrollbar,
+.results-area::-webkit-scrollbar {
+  display: none;
 }
