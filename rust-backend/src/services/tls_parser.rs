@@ -698,9 +698,10 @@ pub fn parse_server_key_exchange_content(
         payload.len()
     );
 
+    //cursor is used to read the payload byte-by-byte
     let mut cursor = Cursor::new(payload);
-    let start_params = 0;
-    let curve_type = cursor.read_u8()?;
+    let start_params = 0; //start of the params
+    let curve_type = cursor.read_u8()?; //read the curve type should be 0x03 for P-256 ECDHE
     if curve_type != 0x03 {
         return Err(TlsParserError::InvalidNamedGroup(curve_type as u16));
     }
@@ -708,15 +709,15 @@ pub fn parse_server_key_exchange_content(
     if NamedGroup::try_from_u16(named_curve).is_none() {
         return Err(TlsParserError::InvalidNamedGroup(named_curve));
     }
-    let public_key_len = cursor.read_u8()? as usize;
+    let public_key_len = cursor.read_u8()? as usize; // read the length of the public key
     let mut public_key_bytes = vec![0; public_key_len];
     cursor.read_exact(&mut public_key_bytes)?;
     let end_params = cursor.position() as usize;
-    let params_raw = payload[start_params..end_params].to_vec();
-    let mut signature_algorithm = [0; 2];
+    let params_raw = payload[start_params..end_params].to_vec(); //get the raw bytes from the start to the end of the params
+    let mut signature_algorithm = [0; 2]; //read the signature algorithm
     cursor.read_exact(&mut signature_algorithm)?;
-    let signature_len = cursor.read_u16::<BigEndian>()? as usize;
-    let mut signature_bytes = vec![0; signature_len];
+    let signature_len = cursor.read_u16::<BigEndian>()? as usize; //read the length of the signature
+    let mut signature_bytes = vec![0; signature_len]; //create a vector to store the signature
     cursor.read_exact(&mut signature_bytes)?;
     if cursor.position() as usize != payload.len() {
         return Err(TlsParserError::MalformedMessage(
@@ -737,6 +738,6 @@ pub fn parse_server_key_exchange_content(
         public_key: public_key_bytes,
         signature_algorithm,
         signature: signature_bytes,
-        params_raw, // NEW
+        params_raw,
     })
 }

@@ -10,7 +10,7 @@ async fn main() {
 
     // Build the Axum app
     let app = Router::new()
-        .route("/assess", post(assess_domain))
+        .route("/assess", post(assess_domain)) //when a post is made, assess_domain is called
         .layer(cors);
 
     // Start the server

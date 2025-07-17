@@ -19,6 +19,7 @@ use std::string::ToString;
 pub static OID_RSA_ENCRYPTION: Lazy<Oid> = Lazy::new(|| Oid::new_unwrap("1.2.840.113549.1.1.1"));
 pub static OID_EC_PUBLIC_KEY: Lazy<Oid> = Lazy::new(|| Oid::new_unwrap("1.2.840.10045.2.1"));
 
+//Full implementation of the validation of the server key exchange signature.
 pub fn verify_server_key_exchange_signature(
     ske: &ServerKeyExchangeParsed,
     client_random: &[u8; 32],

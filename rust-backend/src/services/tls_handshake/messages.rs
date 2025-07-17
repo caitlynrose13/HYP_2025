@@ -132,29 +132,26 @@ impl HandshakeMessage {
         Ok((full_tls_record, raw_client_hello_handshake_message))
     }
 
-    // This function now takes the pre-generated client ephemeral public key
-    // It does not generate a new key pair.
-    // Modified to return both the TLS record and the raw ClientKeyExchange handshake message
+    //CreateKeyExchange
     pub fn create_client_key_exchange(
         client_ephemeral_public_bytes: &[u8], // The public key from the initial key generation
     ) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
-        // Correct: include the EC point length byte before the EC point
         let mut client_key_exchange_payload = Vec::new();
         client_key_exchange_payload.push(client_ephemeral_public_bytes.len() as u8); // EC point length
         client_key_exchange_payload.extend_from_slice(client_ephemeral_public_bytes);
 
-        // Build the raw ClientKeyExchange handshake message (type + length + payload)
+        // Build the raw ClientKeyExchange handshake message (type + length + payload) [0x10][len3][payload]
         let mut raw_client_key_exchange_handshake_message = Vec::new();
-        raw_client_key_exchange_handshake_message
+        raw_client_key_exchange_handshake_message //0x10 is type of ClientKeyExchange
             .push(HandshakeMessageType::ClientKeyExchange.as_u8());
         let handshake_len_bytes = (client_key_exchange_payload.len() as u32).to_be_bytes();
         raw_client_key_exchange_handshake_message.extend_from_slice(&handshake_len_bytes[1..4]);
         raw_client_key_exchange_handshake_message.extend_from_slice(&client_key_exchange_payload);
 
-        // Build the full TLS record
+        // Build the full TLS record  [ContentType][Version][Length][Handshake Message]
         let full_tls_record = Self::build_tls_record(
             TlsContentType::Handshake,
-            TlsVersion::TLS1_2, // Changed from TLS1_0 to TLS1_2 for real-world compatibility
+            TlsVersion::TLS1_2,                                //need to update 1.3
             raw_client_key_exchange_handshake_message.clone(), // Clone for the record
         );
 
@@ -173,11 +170,13 @@ impl HandshakeMessage {
         )))
     }
 
+    //extract the key exchange message from the server response
     pub fn parse_server_key_exchange_message(
         input: &[u8],
     ) -> Result<ServerKeyExchangeParsed, TlsError> {
         let handshake_messages = parse_handshake_messages(input)?;
         for msg in handshake_messages {
+            //if serverkeyexchange is found, parse the content
             if msg.msg_type == HandshakeMessageType::ServerKeyExchange {
                 return parse_server_key_exchange_content(&msg.payload).map_err(TlsError::from);
             }

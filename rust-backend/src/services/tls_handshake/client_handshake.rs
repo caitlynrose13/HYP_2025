@@ -25,6 +25,7 @@ pub enum TlsSecurityLevel {
     Unknown,    // Couldn't determine
 }
 
+//this is the main ctls code and primariy uses 1.2 - there is inconsistenct naming because poor planning....
 pub struct TlsConnectionState {
     pub master_secret: Vec<u8>,
     pub client_write_key: Vec<u8>,
@@ -49,6 +50,7 @@ struct HandshakeState {
     chosen_cipher_suite: Option<[u8; 2]>,
 }
 
+//uppdate sets te state to true/false - tracks the part of the handshake that has been completed
 impl HandshakeState {
     fn update(
         &mut self,
@@ -62,6 +64,7 @@ impl HandshakeState {
                 // Parse and store the chosen cipher suite
                 if payload.len() > 4 {
                     match crate::services::tls_parser::parse_server_hello_content(&payload[4..]) {
+                        //skip the first 4 bytes which contains the length of the server hello, go straight to message
                         Ok(parsed) => {
                             self.chosen_cipher_suite = Some(parsed.chosen_cipher_suite);
                         }
@@ -78,6 +81,7 @@ impl HandshakeState {
         }
     }
 
+    //check if all required messages have been received
     fn all_required_received(&self) -> bool {
         if let Some(cs_id) = self.chosen_cipher_suite {
             // ECDHE_RSA suites
@@ -109,47 +113,51 @@ pub fn perform_tls_handshake_full_with_cert(
     domain: &str,
     tls_version: TlsVersion,
 ) -> Result<(TlsConnectionState, Option<Vec<u8>>), TlsError> {
-    // Use the provided domain parameter
+    // Use the provided domain parameter.
+    // TODO: Add HSTS detection.
+
     let domain = domain;
-    let port = 443;
+    let port = 443; //default for tls/https
     let addr_str = format!("{}:{}", domain, port);
     let mut addrs_iter = addr_str
-        .to_socket_addrs()
-        .map_err(|e| TlsError::InvalidAddress(format!("Couldn't resolve address: {}", e)))?;
+        .to_socket_addrs() //convert the domain to an address
+        .map_err(|e| TlsError::InvalidAddress(format!("Couldn't resolve address: {}", e)))?; //if error return error
     let addr = addrs_iter
-        .next()
+        .next() //get the first address
         .ok_or_else(|| TlsError::ConnectionFailed(format!("No address found for {}", domain)))?;
 
+    //connect to the address and start tcp connection, after 10 sec give up
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| TlsError::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
 
     let mut handshake_transcript: Vec<u8> = Vec::new();
 
-    let mut client_random = [0u8; 32];
-    rand::thread_rng().fill(&mut client_random);
+    let mut client_random = [0u8; 32]; // client random balue used for key derivation later
+    rand::thread_rng().fill(&mut client_random); //fill random bytes 
 
     let mut rng = thread_rng();
-    let client_ephemeral_secret = EphemeralSecret::random(&mut rng);
+    let client_ephemeral_secret = EphemeralSecret::random(&mut rng); // new ephemeral secret for each handshake
     let client_ephemeral_public_encoded =
         client_ephemeral_secret.public_key().to_encoded_point(false);
-    let client_ephemeral_public_bytes = client_ephemeral_public_encoded.as_bytes();
+    let client_ephemeral_public_bytes = client_ephemeral_public_encoded.as_bytes(); // get the raw byes to send to server
 
-    // Client Hello
+    // Client Hello - record is the full tls record with headers, raw client handshake is the bytes with no record header
     let (client_hello_record, raw_client_hello_handshake) =
         messages::HandshakeMessage::build_client_hello_with_random_and_key_share(
             domain,
             tls_version,
             &client_random,
-            client_ephemeral_public_bytes,
+            client_ephemeral_public_bytes, //for key exchange
         )?;
-    stream.write_all(&client_hello_record)?;
-    handshake_transcript.extend_from_slice(&raw_client_hello_handshake);
+    stream.write_all(&client_hello_record)?; //send the clienthello over tcp stream
+    handshake_transcript.extend_from_slice(&raw_client_hello_handshake); //append the raw message as well for the finished message/keyderivation
 
     // Server Response
+    //prepare the message
     let handshake_transcript_len = handshake_transcript.len();
     let mut handshake_messages = Vec::new();
-    let mut handshake_state = HandshakeState::default();
+    let mut handshake_state = HandshakeState::default(); //track the messages recieved 
 
     // Read all handshake records until all required messages are received
     while !handshake_state.all_required_received() {
@@ -163,6 +171,7 @@ pub fn perform_tls_handshake_full_with_cert(
         handshake_messages.extend(msgs);
     }
 
+    //trim the message to upto the number of messages recieved
     handshake_transcript.truncate(
         handshake_transcript_len
             + handshake_messages
@@ -198,19 +207,21 @@ pub fn perform_tls_handshake_full_with_cert(
                 "ServerKeyExchange not found in handshake messages".to_string(),
             )
         })?;
+
+    //send the key exchange message to the function and assign
     let server_key_exchange = messages::HandshakeMessage::parse_server_key_exchange_message(
         &server_key_exchange_msg.raw_bytes,
     )?;
 
     // Parse Certificate
-    let certificate_msg = handshake_messages
+    let certificate_msg = handshake_messages //get the certificate message from the handshake messages
         .iter()
         .find(|m| m.msg_type == crate::services::tls_parser::HandshakeMessageType::Certificate)
         .ok_or_else(|| {
             TlsError::HandshakeFailed("Certificate not found in handshake messages".to_string())
         })?;
     let certificates =
-        crate::services::tls_parser::parse_certificate_list(&certificate_msg.raw_bytes[4..])?;
+        crate::services::tls_parser::parse_certificate_list(&certificate_msg.raw_bytes[4..])?; //skip the first 4 bytes which contains the length of the certificate list
     let first_cert = certificates.get(0).cloned();
 
     // Convert chosen_cipher_suite from [u8; 2] to CipherSuite
@@ -224,6 +235,7 @@ pub fn perform_tls_handshake_full_with_cert(
         ))
     })?;
 
+    //authenticate the key exchange parameters with server certificate and rnadom values.
     validation::verify_server_key_exchange_signature(
         &server_key_exchange,
         &client_random,
@@ -231,6 +243,7 @@ pub fn perform_tls_handshake_full_with_cert(
         &certificates,
     )?;
 
+    //take server ephemeral pub key and convert to public key using sec1 encoding. (ECDHE)
     let server_ephemeral_point = EncodedPoint::from_bytes(&server_key_exchange.public_key)
         .map_err(|_| {
             TlsError::KeyDerivationError("Invalid server ephemeral public key format".to_string())
@@ -242,9 +255,12 @@ pub fn perform_tls_handshake_full_with_cert(
                 e
             ))
         })?;
-    let shared_secret = client_ephemeral_secret.diffie_hellman(&server_public_key);
-    let pre_master_secret = shared_secret.raw_secret_bytes().to_vec();
 
+    //calculate the shared secret using the client ephemeral secret and the server public key.
+    let shared_secret = client_ephemeral_secret.diffie_hellman(&server_public_key);
+    let pre_master_secret = shared_secret.raw_secret_bytes().to_vec(); //will be used to derive the master secret.
+
+    //Get mastersecret and key block
     let master_secret = keys::calculate_master_secret(
         &pre_master_secret,
         &client_random,
@@ -259,6 +275,7 @@ pub fn perform_tls_handshake_full_with_cert(
         &chosen_cipher_suite,
     )?;
 
+    //only 1.2 for now,
     let (
         client_write_key,
         server_write_key,
@@ -277,15 +294,15 @@ pub fn perform_tls_handshake_full_with_cert(
         CipherSuite,
     ) = if tls_version == TlsVersion::TLS1_2 {
         let (client_cipher, client_iv, server_cipher, server_iv) =
-            keys::derive_aead_keys(&chosen_cipher_suite, &key_block)?;
+            keys::derive_aead_keys(&chosen_cipher_suite, &key_block)?; //derive the aead keys for the cipher suite
 
         let key_len = chosen_cipher_suite.key_length as usize;
         let mut offset = 0;
-        offset += chosen_cipher_suite.mac_key_length as usize;
-        offset += chosen_cipher_suite.mac_key_length as usize;
-        let client_key = key_block[offset..offset + key_len].to_vec();
+        offset += chosen_cipher_suite.mac_key_length as usize; //skip the Client mac key
+        offset += chosen_cipher_suite.mac_key_length as usize; //skip the Server mac key
+        let client_key = key_block[offset..offset + key_len].to_vec(); //get the client key
         offset += key_len;
-        let server_key = key_block[offset..offset + key_len].to_vec();
+        let server_key = key_block[offset..offset + key_len].to_vec(); //get the server key
 
         (
             client_key,
@@ -302,15 +319,16 @@ pub fn perform_tls_handshake_full_with_cert(
         ));
     };
 
-    let mut client_sequence_number: u64 = 0;
+    let mut client_sequence_number: u64 = 0; //sequence numbers to prevent replay attacks, start at 0
     let (client_key_exchange_record, raw_client_key_exchange_handshake) =
         messages::HandshakeMessage::create_client_key_exchange(client_ephemeral_public_bytes)?;
     stream.write_all(&client_key_exchange_record)?;
     handshake_transcript.extend_from_slice(&raw_client_key_exchange_handshake);
 
-    let change_cipher_spec_record = messages::HandshakeMessage::create_change_cipher_spec();
+    let change_cipher_spec_record = messages::HandshakeMessage::create_change_cipher_spec(); //tell server that encryption is starting andf will use negotiated cipher suite
     stream.write_all(&change_cipher_spec_record)?;
 
+    //calculate the verify data for the client finished message. Final step of the handshake. proving end same keys
     let (client_verify_data, _client_handshake_hash) = keys::calculate_verify_data_with_hash(
         &master_secret,
         &handshake_transcript,
@@ -457,39 +475,39 @@ pub fn perform_tls_handshake_full_with_cert(
     ))
 }
 
-// === Helper: Build encrypted TLS record with explicit nonce ===
+// Build encrypted TLS record with explicit nonce
 fn build_tls12_gcm_record_with_explicit_nonce(
     content_type: TlsContentType,
     tls_version: TlsVersion,
     ciphertext_with_tag: &[u8],
     sequence_number: u64,
 ) -> Vec<u8> {
-    // Prepend the explicit nonce (sequence number) to the ciphertext
+    // create the payload
     let mut payload = Vec::with_capacity(8 + ciphertext_with_tag.len());
     payload.extend_from_slice(&sequence_number.to_be_bytes());
     payload.extend_from_slice(ciphertext_with_tag);
     // Build the TLS record
-    let mut record = Vec::new();
+    let mut record = Vec::new(); //Header is [ContentType, VersionMajor, VersionMinor, Length]
     record.push(content_type.as_u8());
-    let (major, minor) = tls_version.to_u8_pair();
+    let (major, minor) = tls_version.to_u8_pair(); //version major and mnor
     record.push(major);
     record.push(minor);
-    record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    record.extend_from_slice(&(payload.len() as u16).to_be_bytes()); //payload is [ExplicitNonce , Ciphertext+Tag]
     record.extend_from_slice(&payload);
     record
 }
 
-/// Reads a single TLS record from the stream.
+/// Reads a single TLS record from a tcp stream., returns a tls record
 pub fn read_tls_record<R: Read>(
     reader: &mut R,
-    _tls_version: TlsVersion, // tls_version is not directly used here, but kept for signature consistency
+    _tls_version: TlsVersion,
 ) -> Result<TlsRecord, TlsError> {
     use std::io::{self};
     use std::time::Duration;
     let mut header = [0u8; 5];
     let mut bytes_read = 0;
 
-    // Read the 5-byte header
+    // Read the 5 byte header
     while bytes_read < 5 {
         match reader.read(&mut header[bytes_read..]) {
             Ok(0) => {
@@ -565,6 +583,7 @@ pub fn read_tls_record<R: Read>(
     Ok(record)
 }
 
+//test the tls security level of the server => currently only 1.2
 pub fn probe_tls_security_level(domain: &str) -> TlsSecurityLevel {
     println!("Probing {} for TLS security level...", domain);
 

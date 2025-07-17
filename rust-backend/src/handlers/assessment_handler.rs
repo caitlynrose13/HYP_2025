@@ -10,6 +10,7 @@ pub struct AssessmentRequest {
 }
 
 #[derive(Serialize)]
+
 pub struct AssessmentResponse {
     pub domain: String,
     pub message: String,
@@ -26,15 +27,19 @@ pub struct AssessmentResponse {
     pub grade: Option<String>, // New field for grade
 }
 
+//recieves a json payload with a domain from client. => need to update when 1.3 is implemented
+// TODO: Add TLS 1.3 support and HSTS detection.
 pub async fn assess_domain(
     Json(payload): Json<AssessmentRequest>,
 ) -> (StatusCode, Json<AssessmentResponse>) {
     let domain = payload.domain;
     println!("assess_domain: Starting handshake for domain: {}", domain);
+    //call 1.2 handshake code
     match crate::services::tls_handshake::client_handshake::perform_tls_handshake_full_with_cert(
         &domain,
-        TlsVersion::TLS1_2,
+        TlsVersion::TLS1_2, //testing 1.2 hadnshake
     ) {
+        //if 1.2 handshake success return certificate, state is the cipher,version and cert_dar is cert in DER format
         Ok((state, cert_der)) => {
             println!(
                 "assess_domain: Handshake complete. Got cert_der: {}",
@@ -45,6 +50,7 @@ pub async fn assess_domain(
                     "assess_domain: Parsing certificate ({} bytes)...",
                     der.len()
                 );
+                //call the parse_certificate and send the der format
                 let res = parse_certificate(der);
                 match &res {
                     Ok(cert) => println!(
@@ -56,7 +62,7 @@ pub async fn assess_domain(
                 res.ok()
             });
 
-            // Grading logic
+            // Grading logic **MUST UPDATE STILL
             let cipher_is_strong = state.negotiated_cipher_suite.name.contains("GCM");
             let cert_valid = parsed.as_ref().map_or(false, |c| !c.expired);
             let grade_input = GradeInput {
@@ -66,11 +72,11 @@ pub async fn assess_domain(
                 cert_valid,
                 hsts: false, //false for now
             };
-            let grade = grade_site(&grade_input);
+            let grade = grade_site(&grade_input); //send the grade_input to the grade_site function is security grader
 
             println!("assess_domain: Returning success response");
             (
-                StatusCode::OK,
+                StatusCode::OK, //send all the things
                 Json(AssessmentResponse {
                     domain,
                     message: "TLS handshake succeeded".to_string(),
@@ -80,8 +86,8 @@ pub async fn assess_domain(
                     cert_issuer: parsed.as_ref().map(|c| c.issuer.clone()),
                     cert_valid_from: parsed.as_ref().map(|c| c.not_before.clone()),
                     cert_valid_to: parsed.as_ref().map(|c| c.not_after.clone()),
-                    cert_key_size: None, // Not parsed in current parser
-                    cert_signature_algorithm: None, // Not parsed in current parser
+                    cert_key_size: None,
+                    cert_signature_algorithm: None,
                     cert_chain_trust: Some(if parsed.as_ref().map_or(false, |c| !c.expired) {
                         "Trusted".to_string()
                     } else {
