@@ -1,6 +1,6 @@
 use super::errors::TlsError;
 use byteorder::{BigEndian, ReadBytesExt};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 
 // TLS Versions
 pub const TLS_1_2_MAJOR: u8 = 0x03;
@@ -545,95 +545,152 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
 }
 
 pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, TlsParserError> {
+    use hex;
+    use std::io::Cursor;
+    println!(
+        "[DEBUG] Entering parse_server_hello_content, payload: {}",
+        hex::encode(payload)
+    );
     let mut cursor = Cursor::new(payload);
 
-    if payload.len() < 38 {
+    // 1. Version
+    if payload.len() < 2 {
+        println!(
+            "[DEBUG] MalformedServerHello: payload too short for version ({} bytes)",
+            payload.len()
+        );
         return Err(TlsParserError::MalformedServerHello);
     }
+    let negotiated_tls_version = (cursor.get_ref()[0], cursor.get_ref()[1]);
+    println!(
+        "[DEBUG] Parsed version: {:02x}{:02x}",
+        negotiated_tls_version.0, negotiated_tls_version.1
+    );
+    cursor.set_position(2);
 
-    let negotiated_tls_version = (cursor.read_u8()?, cursor.read_u8()?);
-    let mut server_random_bytes = [0u8; 32];
-    cursor.read_exact(&mut server_random_bytes)?;
-
-    let session_id_len = cursor.read_u8()? as usize;
-
-    if cursor.position() as usize + session_id_len + 3 > payload.len() {
+    // 2. Server random
+    if payload.len() < 34 {
+        println!(
+            "[DEBUG] MalformedServerHello: payload too short for server random ({} bytes)",
+            payload.len()
+        );
         return Err(TlsParserError::MalformedServerHello);
     }
-    cursor.set_position(cursor.position() + session_id_len as u64); // Move cursor past session ID
+    let mut server_random = [0u8; 32];
+    server_random.copy_from_slice(&cursor.get_ref()[2..34]);
+    println!(
+        "[DEBUG] Parsed server_random: {}",
+        hex::encode(&server_random)
+    );
+    cursor.set_position(34);
 
-    let chosen_cipher_suite = [cursor.read_u8()?, cursor.read_u8()?];
-    let _chosen_compression_method = cursor.read_u8()?;
+    // 3. Session ID
+    if cursor.position() as usize >= payload.len() {
+        println!("[DEBUG] MalformedServerHello: no session id length byte");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let session_id_len = cursor.get_ref()[cursor.position() as usize] as usize;
+    println!("[DEBUG] Parsed session_id_len: {}", session_id_len);
+    cursor.set_position(cursor.position() + 1);
 
-    let mut server_key_share_public: Option<Vec<u8>> = None;
+    if cursor.position() as usize + session_id_len > payload.len() {
+        println!("[DEBUG] MalformedServerHello: session id out of bounds");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let session_id =
+        &cursor.get_ref()[cursor.position() as usize..cursor.position() as usize + session_id_len];
+    println!("[DEBUG] Parsed session_id: {}", hex::encode(session_id));
+    cursor.set_position(cursor.position() + session_id_len as u64);
 
-    // Check if there are extensions
-    if (cursor.position() as usize) < payload.len() {
-        let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
-        let extensions_start_pos = cursor.position() as usize;
+    // 4. Cipher suite
+    if cursor.position() as usize + 2 > payload.len() {
+        println!("[DEBUG] MalformedServerHello: cipher suite out of bounds");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let chosen_cipher_suite = [
+        cursor.get_ref()[cursor.position() as usize],
+        cursor.get_ref()[cursor.position() as usize + 1],
+    ];
+    println!(
+        "[DEBUG] Parsed cipher_suite: {:02x}{:02x}",
+        chosen_cipher_suite[0], chosen_cipher_suite[1]
+    );
+    cursor.set_position(cursor.position() + 2);
 
-        if extensions_start_pos + extensions_len > payload.len() {
-            return Err(TlsParserError::MalformedMessage(
-                "ServerHello extensions length mismatch.".to_string(),
-            ));
+    // 5. Compression method
+    if cursor.position() as usize >= payload.len() {
+        println!("[DEBUG] MalformedServerHello: no compression method");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let compression_method = cursor.get_ref()[cursor.position() as usize];
+    println!(
+        "[DEBUG] Parsed compression_method: {:02x}",
+        compression_method
+    );
+    cursor.set_position(cursor.position() + 1);
+
+    // 6. Extensions
+    if cursor.position() as usize + 2 > payload.len() {
+        println!("[DEBUG] MalformedServerHello: no extensions length");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let extensions_len = (cursor.get_ref()[cursor.position() as usize] as usize) << 8
+        | (cursor.get_ref()[cursor.position() as usize + 1] as usize);
+    println!("[DEBUG] Parsed extensions_len: {}", extensions_len);
+    cursor.set_position(cursor.position() + 2);
+
+    if cursor.position() as usize + extensions_len > payload.len() {
+        println!("[DEBUG] MalformedServerHello: extensions out of bounds");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let extensions =
+        &cursor.get_ref()[cursor.position() as usize..cursor.position() as usize + extensions_len];
+    println!("[DEBUG] Parsed extensions: {}", hex::encode(extensions));
+    // Parse extensions
+    let mut ext_cursor = Cursor::new(extensions);
+    let mut server_key_share_public = None;
+    while (ext_cursor.position() as usize) + 4 <= extensions_len {
+        let ext_type = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]);
+        let ext_len = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]) as usize;
+        println!("[DEBUG] Extension type: {:04x}, len: {}", ext_type, ext_len);
+        std::io::stdout().flush().unwrap();
+        if (ext_cursor.position() as usize) + ext_len > extensions_len {
+            println!("[DEBUG] MalformedServerHello: extension length out of bounds");
+            std::io::stdout().flush().unwrap();
+            break;
         }
-
-        let extensions_data_end = extensions_start_pos + extensions_len;
-        let mut ext_cursor = Cursor::new(&payload[extensions_start_pos..extensions_data_end]);
-
-        while (ext_cursor.position() as usize) + 4 <= ext_cursor.get_ref().len() {
-            let ext_type = ext_cursor.read_u16::<BigEndian>()?;
-            let ext_len = ext_cursor.read_u16::<BigEndian>()? as usize;
-
-            if (ext_cursor.position() as usize) + ext_len > ext_cursor.get_ref().len() {
-                return Err(TlsParserError::MalformedMessage(
-                    "ServerHello extension data length mismatch.".to_string(),
-                ));
-            }
-
-            let ext_content_start = ext_cursor.position() as usize;
-            let ext_content_end = ext_content_start + ext_len;
-            let ext_content = &ext_cursor.get_ref()[ext_content_start..ext_content_end];
-
-            if negotiated_tls_version.0 == 0x03 && negotiated_tls_version.1 == 0x04 {
-                if ext_type == EXTENSION_TYPE_KEY_SHARE {
-                    // Using the new constant
-                    if ext_content.len() < 4 {
-                        // Group (2 bytes) + Key Exchange Length (2 bytes)
-                        return Err(TlsParserError::MalformedMessage(
-                            "Malformed key_share extension".to_string(),
-                        ));
-                    }
-                    let group_id = u16::from_be_bytes([ext_content[0], ext_content[1]]);
-                    let key_exchange_len =
-                        u16::from_be_bytes([ext_content[2], ext_content[3]]) as usize;
-
-                    if 4 + key_exchange_len > ext_content.len() {
-                        return Err(TlsParserError::MalformedMessage(
-                            "Key exchange data length mismatch in key_share".to_string(),
-                        ));
-                    }
-
-                    if NamedGroup::try_from_u16(group_id).is_some() {
-                        server_key_share_public =
-                            Some(ext_content[4..4 + key_exchange_len].to_vec());
-                    } else {
-                        println!(
-                            "Warning: Server offered unsupported key_share group: 0x{:04X}",
-                            group_id
-                        );
-                    }
+        let mut ext_data = vec![0u8; ext_len];
+        ext_cursor.read_exact(&mut ext_data)?;
+        println!("[DEBUG] Extension data: {}", hex::encode(&ext_data));
+        std::io::stdout().flush().unwrap();
+        // Key Share extension (0x0033)
+        if ext_type == 0x0033 {
+            if ext_len >= 4 {
+                let group = u16::from_be_bytes([ext_data[0], ext_data[1]]);
+                let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
+                println!(
+                    "[DEBUG] KeyShare group: {:04x}, key_len: {}",
+                    group, key_len
+                );
+                std::io::stdout().flush().unwrap();
+                if ext_len >= 4 + key_len {
+                    let key = &ext_data[4..4 + key_len];
+                    println!("[DEBUG] KeyShare public: {}", hex::encode(key));
+                    std::io::stdout().flush().unwrap();
+                    server_key_share_public = Some(key.to_vec());
+                } else {
+                    println!("[DEBUG] KeyShare extension too short for key");
+                    std::io::stdout().flush().unwrap();
                 }
+            } else {
+                println!("[DEBUG] KeyShare extension too short");
+                std::io::stdout().flush().unwrap();
             }
-
-            ext_cursor.set_position(ext_content_end as u64)
         }
-        cursor.set_position(extensions_data_end as u64);
     }
-
     Ok(ServerHelloParsed {
         negotiated_tls_version,
-        server_random: server_random_bytes,
+        server_random,
         chosen_cipher_suite,
         server_key_share_public,
     })

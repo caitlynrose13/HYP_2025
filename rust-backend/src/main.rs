@@ -3,8 +3,17 @@ use rust_backend::handlers::assessment_handler::assess_domain;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
+mod services;
+
 #[tokio::main]
 async fn main() {
+    // Initialize logging
+    tracing_subscriber::fmt::init();
+
+    println!("--- TLS 1.3 ClientHello test to google.com ---");
+    crate::services::tls_handshake::tls13::client::test_send_client_hello_to_google();
+    println!("--- Done ---");
+
     // Set up CORS for local dev
     let cors = CorsLayer::new().allow_origin(Any);
 

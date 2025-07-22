@@ -467,3 +467,26 @@ pub fn derive_hkdf_keys(
 
     Ok(output)
 }
+
+// X25519 keypair generation
+pub fn generate_x25519_keypair() -> (x25519_dalek::EphemeralSecret, [u8; 32]) {
+    use rand::rngs::OsRng;
+    use x25519_dalek::{EphemeralSecret, PublicKey};
+    let secret = EphemeralSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret);
+    let pub_bytes = public.to_bytes();
+    (secret, pub_bytes)
+}
+
+// P-256 keypair generation
+pub fn generate_p256_keyshare() -> ([u8; 65], p256::ecdh::EphemeralSecret) {
+    use p256::EncodedPoint;
+    use p256::ecdh::EphemeralSecret;
+    use rand::rngs::OsRng;
+    let secret = EphemeralSecret::random(&mut OsRng);
+    let public_point = EncodedPoint::from(&secret.public_key());
+    let pub_bytes = public_point.to_bytes();
+    let mut arr = [0u8; 65];
+    arr.copy_from_slice(&pub_bytes);
+    (arr, secret)
+}
