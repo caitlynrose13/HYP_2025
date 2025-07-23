@@ -1,14 +1,28 @@
+// src/services/tls_handshake/tls13/messages.rs
+
 // TLS 1.3 handshake message builders and parsers
-
 use crate::services::tls_parser::{
-    EXTENSION_TYPE_KEY_SHARE, EXTENSION_TYPE_SERVER_NAME, EXTENSION_TYPE_SIGNATURE_ALGORITHMS,
-    EXTENSION_TYPE_SUPPORTED_GROUPS, EXTENSION_TYPE_SUPPORTED_VERSIONS, Extension,
-    HandshakeMessageType, NamedGroup, SNI_HOSTNAME_TYPE, TlsContentType, TlsVersion,
+    EXTENSION_TYPE_KEY_SHARE,
+    EXTENSION_TYPE_SERVER_NAME,
+    EXTENSION_TYPE_SIGNATURE_ALGORITHMS,
+    EXTENSION_TYPE_SUPPORTED_GROUPS,
+    EXTENSION_TYPE_SUPPORTED_VERSIONS,
+    Extension, // This is fine, used by Extension::new(...)
+    HandshakeMessageType,
+    NamedGroup,
+    SNI_HOSTNAME_TYPE,
+    TlsContentType,
+    // REMOVED: ServerHelloParsed, parse_tls_extension, TlsParserError (not needed here)
+    TlsVersion,
 };
-use rand::RngCore;
+use rand::RngCore; // This is used by rand::thread_rng().fill_bytes
 
-/// Build a minimal TLS 1.3 ClientHello message for testing
+
+// REMOVED: use std::io::Write; // Not directly used in this file's functions (build_client_hello).
+
+// ... (Your existing build_client_hello function - no changes needed here, it's correct for building)
 pub fn build_client_hello(domain: &str, client_random: &[u8; 32], x25519_pubkey: &[u8]) -> Vec<u8> {
+    // ... (content of your build_client_hello - this part is fine)
     let mut client_hello_payload = Vec::new();
 
     // Legacy version (TLS 1.2) for compatibility
@@ -112,16 +126,20 @@ pub fn build_client_hello(domain: &str, client_random: &[u8; 32], x25519_pubkey:
 pub fn test_print_client_hello() {
     use rand::RngCore;
     use rand::thread_rng;
+    // REMOVED: use hex; // Not allowed if avoiding external crates for *any* purpose
+
     let mut rng = thread_rng();
     let mut client_random = [0u8; 32];
     rng.fill_bytes(&mut client_random);
     let mut x25519_pubkey = [0u8; 32];
     rng.fill_bytes(&mut x25519_pubkey);
     let record = build_client_hello("google.com", &client_random, &x25519_pubkey);
-    println!("ClientHello record (hex): {}", hex::encode(&record));
+    println!(
+        "ClientHello record (debug print, {} bytes): {:?}",
+        record.len(),
+        &record
+    ); // Use {:?}
 }
 
-pub fn parse_server_hello(_data: &[u8]) -> Result<(), crate::services::errors::TlsError> {
-    // TODO: Parse TLS 1.3 ServerHello message
-    Ok(())
-}
+// REMOVED: pub fn parse_tls13_server_hello_payload(...) - This function is MOVED to tls_parser.rs
+// REMOVED: pub fn parse_server_hello(_data: &[u8]) - This function is MOVED/integrated into tls_parser.rs

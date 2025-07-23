@@ -22,7 +22,7 @@ impl TranscriptHash {
         arr
     }
     pub fn clone_hash(&self) -> [u8; 32] {
-        let mut hasher = self.hasher.clone();
+        let hasher = self.hasher.clone();
         let result = hasher.finalize();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&result);

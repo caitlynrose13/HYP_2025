@@ -9,6 +9,47 @@ use sha2::{Digest, Sha256, Sha384};
 use crate::services::errors::TlsError;
 use crate::services::tls_parser::{CipherSuite, TlsContentType, TlsVersion};
 use typenum::{U12, U16};
+/// HKDF-Extract for TLS 1.3 (RFC 8446)
+pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<ring::hkdf::Prk, TlsError> {
+    use ring::hkdf::{HKDF_SHA256, Salt};
+    let salt = Salt::new(HKDF_SHA256, salt);
+    let prk = salt.extract(ikm);
+    Ok(prk)
+}
+
+/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1)
+pub fn hkdf_expand_label(
+    prk: &ring::hkdf::Prk,
+    label: &[u8],
+    context: &[u8],
+    length: usize,
+) -> Result<Vec<u8>, TlsError> {
+    // TLS 1.3 label prefix
+    let mut full_label = b"tls13 ".to_vec();
+    full_label.extend_from_slice(label);
+    // Structure: length (2 bytes) | label len (1 byte) | label | context len (1 byte) | context
+    let mut info = Vec::new();
+    info.extend_from_slice(&(length as u16).to_be_bytes());
+    info.push(full_label.len() as u8);
+    info.extend_from_slice(&full_label);
+    info.push(context.len() as u8);
+    info.extend_from_slice(context);
+    let info_slice = info.as_slice();
+    let info_ref = [info_slice];
+    struct OkmLen(usize);
+    impl ring::hkdf::KeyType for OkmLen {
+        fn len(&self) -> usize {
+            self.0
+        }
+    }
+    let okm = prk
+        .expand(&info_ref, OkmLen(length))
+        .map_err(|_| TlsError::KeyDerivationError("HKDF expand error".into()))?;
+    let mut out = vec![0u8; length];
+    okm.fill(&mut out)
+        .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
+    Ok(out)
+}
 
 //  AEAD Cipher Enum
 #[derive(Clone)]

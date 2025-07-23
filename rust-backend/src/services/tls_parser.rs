@@ -1,6 +1,7 @@
 use super::errors::TlsError;
 use byteorder::{BigEndian, ReadBytesExt};
-use std::io::{Cursor, Read, Write};
+use hex;
+use std::io::{Cursor, Read, Write}; // Ensure ReadBytesExt is used
 
 // TLS Versions
 pub const TLS_1_2_MAJOR: u8 = 0x03;
@@ -368,6 +369,47 @@ impl Extension {
     }
 }
 
+/// Parses a single TLS Extension from the provided cursor.
+/// Assumes the cursor is positioned at the start of an extension (type + length + payload).
+pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsParserError> {
+    let initial_pos = cursor.position() as usize;
+    let remaining_bytes = cursor.get_ref().len() - initial_pos;
+
+    if remaining_bytes < 4 {
+        return Err(TlsParserError::Incomplete {
+            expected: 4,
+            actual: remaining_bytes,
+        });
+    }
+
+    // Manual parsing of u16 for extension type
+    let ext_type_bytes = &cursor.get_ref()[initial_pos..initial_pos + 2];
+    let ext_type = u16::from_be_bytes([ext_type_bytes[0], ext_type_bytes[1]]);
+    cursor.set_position((initial_pos + 2) as u64); // Move cursor past type bytes
+
+    // Manual parsing of u16 for extension length
+    let ext_len_bytes = &cursor.get_ref()[initial_pos + 2..initial_pos + 4];
+    let ext_len = u16::from_be_bytes([ext_len_bytes[0], ext_len_bytes[1]]) as usize;
+    cursor.set_position((initial_pos + 4) as u64); // Move cursor past length bytes
+
+    if remaining_bytes < 4 + ext_len {
+        return Err(TlsParserError::Incomplete {
+            expected: 4 + ext_len,
+            actual: remaining_bytes,
+        });
+    }
+
+    let mut payload_bytes = vec![0u8; ext_len];
+    cursor
+        .read_exact(&mut payload_bytes)
+        .map_err(|_| TlsParserError::InvalidLength)?; // This read_exact is fine with std::io::Read
+
+    Ok(Extension {
+        extension_type: ext_type,
+        payload: payload_bytes,
+    })
+}
+
 #[derive(Debug)]
 pub struct TlsHandshakeMessage {
     pub msg_type: HandshakeMessageType,
@@ -382,6 +424,23 @@ pub struct ServerHelloParsed {
     pub server_random: [u8; 32],
     pub chosen_cipher_suite: [u8; 2],
     pub server_key_share_public: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServerHello13Parsed {
+    // In TLS 1.3, the 'version' field in the record header and ServerHello
+    // is often 0x0301 (TLS 1.0) for compatibility, but the actual negotiated
+    // version is indicated in the 'supported_versions' extension.
+    pub legacy_version: (u8, u8), // The version field from the ServerHello message (often 0x0301 for TLS 1.3)
+    pub server_random: [u8; 32],
+    pub session_id: Vec<u8>, // In TLS 1.3, this should be empty
+    pub chosen_cipher_suite: [u8; 2],
+    pub legacy_compression_method: u8, // In TLS 1.3, this should be 0x00
+    pub extensions: Vec<Extension>,
+    // Specific TLS 1.3 extensions can be parsed out of the `extensions` Vec later
+    pub negotiated_tls_version: Option<TlsVersion>, // The actual negotiated version from the supported_versions extension
+    pub server_key_share_public: Option<Vec<u8>>,   // Public key from KeyShare extension
+    pub selected_named_group: Option<NamedGroup>,   // Named group from KeyShare extension
 }
 
 #[derive(Debug, Clone)]
@@ -402,6 +461,20 @@ pub struct CipherSuite {
     pub fixed_iv_length: u8,
     pub mac_key_length: u8,
     pub hash_algorithm: HashAlgorithm,
+}
+
+impl CipherSuite {
+    pub fn new(id1: u8, id2: u8) -> Self {
+        // Default to a TLS 1.3 AES-128-GCM-SHA256 cipher
+        CipherSuite {
+            id: [id1, id2],
+            name: "TLS_AES_128_GCM_SHA256",
+            key_length: 16,      // AES-128 key length
+            fixed_iv_length: 12, // TLS 1.3 GCM IV length
+            mac_key_length: 32,  // SHA-256 output length
+            hash_algorithm: HashAlgorithm::Sha256,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,8 +618,6 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
 }
 
 pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, TlsParserError> {
-    use hex;
-    use std::io::Cursor;
     println!(
         "[DEBUG] Entering parse_server_hello_content, payload: {}",
         hex::encode(payload)
@@ -797,4 +868,201 @@ pub fn parse_server_key_exchange_content(
         signature: signature_bytes,
         params_raw,
     })
+}
+
+/// Parses the payload of a TLS 1.3 ServerHello message.
+pub fn parse_tls13_server_hello_payload(
+    payload: &[u8],
+) -> Result<ServerHello13Parsed, TlsParserError> {
+    println!(
+        "[DEBUG] Entering parse_tls13_server_hello_payload, payload: {}",
+        hex::encode(payload)
+    );
+    let mut cursor = Cursor::new(payload);
+    let mut parsed_sh = ServerHello13Parsed::default();
+
+    // 1. Legacy Version (2 bytes)
+    // In TLS 1.3, this should always be 0x0303 (TLS 1.2) for compatibility,
+    // but the actual negotiated version is in the supported_versions extension.
+    if payload.len() < 2 {
+        println!("[DEBUG] MalformedServerHello: payload too short for legacy version.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    parsed_sh.legacy_version = (cursor.read_u8()?, cursor.read_u8()?);
+    println!(
+        "[DEBUG] Parsed legacy_version: {:02x}{:02x}",
+        parsed_sh.legacy_version.0, parsed_sh.legacy_version.1
+    );
+
+    // 2. Server Random (32 bytes)
+    if cursor.position() as usize + 32 > payload.len() {
+        println!("[DEBUG] MalformedServerHello: payload too short for server random.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    cursor.read_exact(&mut parsed_sh.server_random)?;
+    println!(
+        "[DEBUG] Parsed server_random: {}",
+        hex::encode(&parsed_sh.server_random)
+    );
+
+    // 3. Session ID Length (1 byte) and Session ID
+    // In TLS 1.3, the session ID should be empty (length 0).
+    if cursor.position() as usize >= payload.len() {
+        println!("[DEBUG] MalformedServerHello: no session id length byte.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    let session_id_len = cursor.read_u8()? as usize;
+    println!("[DEBUG] Parsed session_id_len: {}", session_id_len);
+
+    if cursor.position() as usize + session_id_len > payload.len() {
+        println!("[DEBUG] MalformedServerHello: session id out of bounds.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    parsed_sh.session_id.resize(session_id_len, 0);
+    cursor.read_exact(&mut parsed_sh.session_id)?;
+    println!(
+        "[DEBUG] Parsed session_id: {}",
+        hex::encode(&parsed_sh.session_id)
+    );
+
+    // 4. Chosen Cipher Suite (2 bytes)
+    if cursor.position() as usize + 2 > payload.len() {
+        println!("[DEBUG] MalformedServerHello: cipher suite out of bounds.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    cursor.read_exact(&mut parsed_sh.chosen_cipher_suite)?;
+    println!(
+        "[DEBUG] Parsed chosen_cipher_suite: {:02x}{:02x}",
+        parsed_sh.chosen_cipher_suite[0], parsed_sh.chosen_cipher_suite[1]
+    );
+
+    // 5. Legacy Compression Method (1 byte)
+    // In TLS 1.3, this should always be 0x00 (null compression).
+    if cursor.position() as usize >= payload.len() {
+        println!("[DEBUG] MalformedServerHello: no legacy compression method.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+    parsed_sh.legacy_compression_method = cursor.read_u8()?;
+    println!(
+        "[DEBUG] Parsed legacy_compression_method: {:02x}",
+        parsed_sh.legacy_compression_method
+    );
+
+    // 6. Extensions (Optional, only if remaining bytes > 0)
+    // Extensions are critical in TLS 1.3 ServerHello.
+    if (cursor.position() as usize) + 2 <= payload.len() {
+        let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
+        println!("[DEBUG] Parsed extensions_len: {}", extensions_len);
+
+        if cursor.position() as usize + extensions_len > payload.len() {
+            println!("[DEBUG] MalformedServerHello: extensions data out of bounds.");
+            return Err(TlsParserError::MalformedServerHello);
+        }
+
+        let extensions_data_start = cursor.position() as usize;
+        let extensions_data_end = extensions_data_start + extensions_len;
+        let extensions_data_slice = &payload[extensions_data_start..extensions_data_end];
+        let mut ext_cursor = Cursor::new(extensions_data_slice);
+
+        while (ext_cursor.position() as usize) < extensions_len {
+            let extension = parse_tls_extension(&mut ext_cursor)?; // Reusing the generic extension parser
+            parsed_sh.extensions.push(extension);
+        }
+        cursor.set_position(cursor.position() + extensions_len as u64); // Advance main cursor past extensions
+    } else if (cursor.position() as usize) < payload.len() {
+        // If there are remaining bytes but not enough for an extensions_len field, it's malformed.
+        println!("[DEBUG] MalformedServerHello: trailing data that is not an extension block.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+
+    // Now, process parsed extensions to populate specific TLS 1.3 fields
+    for ext in &parsed_sh.extensions {
+        match ext.extension_type {
+            EXTENSION_TYPE_SUPPORTED_VERSIONS => {
+                // For ServerHello, this extension payload should be 2 bytes: the negotiated version
+                if ext.payload.len() == 2 {
+                    parsed_sh.negotiated_tls_version =
+                        Some(TlsVersion::from_u8_pair(ext.payload[0], ext.payload[1]));
+                    println!(
+                        "[DEBUG] Parsed Supported Versions extension: Negotiated TLS 1.3 version: {:?}.{:?}",
+                        ext.payload[0], ext.payload[1]
+                    );
+                } else {
+                    println!(
+                        "[DEBUG] Warning: Malformed Supported Versions extension payload length: {}",
+                        ext.payload.len()
+                    );
+                }
+            }
+            EXTENSION_TYPE_KEY_SHARE => {
+                // For ServerHello, KeyShare payload: 2 bytes for named group, then variable bytes for public key
+                if ext.payload.len() >= 4 {
+                    let mut key_share_cursor = Cursor::new(&ext.payload);
+                    let named_group_id = key_share_cursor.read_u16::<BigEndian>()?;
+                    parsed_sh.selected_named_group = NamedGroup::try_from_u16(named_group_id);
+
+                    let key_len = key_share_cursor.read_u16::<BigEndian>()? as usize;
+                    if ext.payload.len() >= 4 + key_len {
+                        let mut public_key_bytes = vec![0u8; key_len];
+                        key_share_cursor.read_exact(&mut public_key_bytes)?;
+                        parsed_sh.server_key_share_public = Some(public_key_bytes);
+                        println!(
+                            "[DEBUG] Parsed KeyShare extension: Group ID: 0x{:04x}, Public Key Length: {}",
+                            named_group_id, key_len
+                        );
+                    } else {
+                        println!("[DEBUG] Warning: KeyShare extension too short for public key.");
+                    }
+                } else {
+                    println!(
+                        "[DEBUG] Warning: Malformed KeyShare extension payload length: {}",
+                        ext.payload.len()
+                    );
+                }
+            }
+            // Add parsing for other relevant TLS 1.3 ServerHello extensions here if needed,
+            // e.g., pre_shared_key (if PSK is supported), cookie, etc.
+            _ => {
+                println!(
+                    "[DEBUG] Unhandled extension type in ServerHello: 0x{:04x}",
+                    ext.extension_type
+                );
+            }
+        }
+    }
+
+    // Final check for unread data
+    if cursor.position() as usize != payload.len() {
+        println!("[DEBUG] MalformedServerHello: trailing data after parsing complete.");
+        return Err(TlsParserError::MalformedServerHello);
+    }
+
+    Ok(parsed_sh)
+}
+
+pub fn parse_tls13_encrypted_extensions_payload(
+    payload: &[u8],
+) -> Result<Vec<Extension>, TlsParserError> {
+    use byteorder::{BigEndian, ReadBytesExt};
+    use std::io::Cursor;
+
+    let mut cursor = Cursor::new(payload);
+    if payload.len() < 2 {
+        return Err(TlsParserError::MalformedMessage(
+            "EncryptedExtensions payload too short for extensions length".to_string(),
+        ));
+    }
+    let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
+    if payload.len() < 2 + extensions_len {
+        return Err(TlsParserError::MalformedMessage(
+            "EncryptedExtensions extensions data out of bounds".to_string(),
+        ));
+    }
+    let mut extensions = Vec::new();
+    let mut ext_cursor = Cursor::new(&payload[2..2 + extensions_len]);
+    while (ext_cursor.position() as usize) < extensions_len {
+        let extension = parse_tls_extension(&mut ext_cursor)?;
+        extensions.push(extension);
+    }
+    Ok(extensions)
 }

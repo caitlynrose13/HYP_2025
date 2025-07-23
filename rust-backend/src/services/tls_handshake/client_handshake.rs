@@ -616,3 +616,17 @@ pub fn probe_tls_security_level(domain: &str) -> TlsSecurityLevel {
     println!("    TLS 1.3 not yet implemented - assuming deprecated if TLS 1.2 failed");
     TlsSecurityLevel::Deprecated
 }
+
+/// Test function to perform a TLS 1.2 handshake with google.com
+/// This function is called from main.rs to ensure the TLS 1.2 code is used
+pub fn test_tls12_handshake_to_google() {
+    let domain = "google.com";
+    match perform_tls_handshake_full(domain, TlsVersion::TLS1_2) {
+        Ok(_) => {
+            println!("TLS 1.2 handshake completed successfully with {}", domain);
+        }
+        Err(e) => {
+            println!("TLS 1.2 handshake failed: {:?}", e);
+        }
+    }
+}

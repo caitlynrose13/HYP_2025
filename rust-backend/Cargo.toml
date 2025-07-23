@@ -21,15 +21,20 @@ dotenvy = "0.15"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-log = "0.4.27" # Keep log for the info! macro
+log = "0.4.27"                                                             # Keep log for the info! macro
 
 uuid = { version = "1", features = ["v4", "serde"] }
 tower-http = { version = "0.5", features = ["cors"] } #prevent CORS ERROR
 
 #tls dependencies
 rand = "0.8"
-p256 = { version = "0.13", features = ["ecdh", "ecdsa"] } # ADDED "ecdsa" feature
-rsa = { version = "0.9", features = ["sha2"] } # ADDED "pkcs1", "pkcs8", "sha2" features
+p256 = { version = "0.13", features = [
+    "ecdh",
+    "ecdsa",
+] } # ADDED "ecdsa" feature
+rsa = { version = "0.9", features = [
+    "sha2",
+] } # ADDED "pkcs1", "pkcs8", "sha2" features
 
 #certificate parsing
 x509-parser = "0.15"
@@ -57,3 +62,5 @@ const-oid = "0.9"
 hyper = "0.14"
 x25519-dalek = "2.0.1"
 rand_core = "0.9.3"
+chacha20poly1305 = "0.10.1"
+generic-array = "0.14.7"

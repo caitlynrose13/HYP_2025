@@ -7,16 +7,18 @@ use webpki;
 
 #[derive(Debug)]
 pub enum TlsError {
+    HandshakeError(String),
     IoError(io::Error),
     ConnectionFailed(String),
     InvalidAddress(String),
     HandshakeFailed(String),
     ParserError(TlsParserError),
     CertificateError(String),
-    KeyExchangeError(String),   // Added for key exchange errors
-    KeyDerivationError(String), // Added for key derivation errors
-    EncryptionError(String),    // Added for encryption errors
-    DecryptionError(String),    // Added for decryption errors
+    KeyExchangeError(String),       // Added for key exchange errors
+    KeyDerivationError(String),     // Added for key derivation errors
+    EncryptionError(String),        // Added for encryption errors
+    DecryptionError(String),        // Added for decryption errors
+    UnsupportedCipherSuite(String), // Added for unsupported cipher suite errors
 }
 
 impl fmt::Display for TlsError {
@@ -32,6 +34,8 @@ impl fmt::Display for TlsError {
             TlsError::KeyDerivationError(msg) => write!(f, "Key Derivation Error: {}", msg),
             TlsError::EncryptionError(msg) => write!(f, "Encryption Error: {}", msg),
             TlsError::DecryptionError(msg) => write!(f, "Decryption Error: {}", msg),
+            TlsError::UnsupportedCipherSuite(msg) => write!(f, "Unsupported Cipher Suite: {}", msg),
+            TlsError::HandshakeError(msg) => write!(f, "Handshake Error: {}", msg),
         }
     }
 }

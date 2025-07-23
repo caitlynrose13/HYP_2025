@@ -10,8 +10,14 @@ async fn main() {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
+    // Test TLS 1.3 handshake
     println!("--- TLS 1.3 ClientHello test to google.com ---");
     crate::services::tls_handshake::tls13::client::test_send_client_hello_to_google();
+    println!("--- Done ---");
+
+    // Test TLS 1.2 handshake
+    println!("--- TLS 1.2 handshake test to google.com ---");
+    crate::services::tls_handshake::client_handshake::test_tls12_handshake_to_google();
     println!("--- Done ---");
 
     // Set up CORS for local dev
