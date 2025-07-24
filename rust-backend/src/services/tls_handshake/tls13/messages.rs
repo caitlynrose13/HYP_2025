@@ -17,7 +17,6 @@ use crate::services::tls_parser::{
 };
 use rand::RngCore; // This is used by rand::thread_rng().fill_bytes
 
-
 // REMOVED: use std::io::Write; // Not directly used in this file's functions (build_client_hello).
 
 // ... (Your existing build_client_hello function - no changes needed here, it's correct for building)
@@ -140,6 +139,3 @@ pub fn test_print_client_hello() {
         &record
     ); // Use {:?}
 }
-
-// REMOVED: pub fn parse_tls13_server_hello_payload(...) - This function is MOVED to tls_parser.rs
-// REMOVED: pub fn parse_server_hello(_data: &[u8]) - This function is MOVED/integrated into tls_parser.rs

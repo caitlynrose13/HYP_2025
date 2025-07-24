@@ -48,6 +48,18 @@ pub fn hkdf_expand_label(
     let mut out = vec![0u8; length];
     okm.fill(&mut out)
         .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
+
+    // --- RFC debug prints ---
+    println!("[RFC CHECK] HKDF label: {}", String::from_utf8_lossy(label));
+    println!(
+        "[RFC CHECK] HKDF full_label (hex): {}",
+        hex::encode(&full_label)
+    );
+    println!("[RFC CHECK] HKDF context (hex): {}", hex::encode(context));
+    println!("[RFC CHECK] HKDF info (hex): {}", hex::encode(&info));
+    println!("[RFC CHECK] HKDF output (hex): {}", hex::encode(&out));
+    // ------------------------
+
     Ok(out)
 }
 

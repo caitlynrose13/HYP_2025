@@ -10,15 +10,16 @@ async fn main() {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    // Test TLS 1.3 handshake
-    println!("--- TLS 1.3 ClientHello test to google.com ---");
-    crate::services::tls_handshake::tls13::client::test_send_client_hello_to_google();
+    // Focus on the core TLS 1.3 decryption issue with one domain
+    println!("--- TLS 1.3 modular client test ---");
+    if let Err(e) = crate::services::tls_handshake::tls13::client::test_tls13_client() {
+        println!("TLS 1.3 client test failed: {}", e);
+    }
     println!("--- Done ---");
 
-    // Test TLS 1.2 handshake
-    println!("--- TLS 1.2 handshake test to google.com ---");
-    crate::services::tls_handshake::client_handshake::test_tls12_handshake_to_google();
-    println!("--- Done ---");
+    // The issue is domain-agnostic, so we don't need to test multiple domains
+    // The issue is also not related to rustls comparison since rustls works fine
+    // Focus only on our TLS 1.3 record decryption logic
 
     // Set up CORS for local dev
     let cors = CorsLayer::new().allow_origin(Any);

@@ -41,7 +41,7 @@ x509-parser = "0.15"
 
 #certificate validation
 webpki = "0.22.4"
-webpki-roots = "0.22.3"
+webpki-roots = "0.25"
 rustls = "0.21.7"
 ring = "0.17"
 time = "0.3"

@@ -28,9 +28,19 @@ pub fn validate_server_certificate(
         .as_secs();
     let time = Time::from_seconds_since_unix_epoch(now);
 
+    // Convert webpki_roots::TrustAnchor to webpki::TrustAnchor
+    let trust_anchors: Vec<webpki::TrustAnchor> = TLS_SERVER_ROOTS
+        .iter()
+        .map(|ta| webpki::TrustAnchor {
+            subject: ta.subject,
+            spki: ta.spki,
+            name_constraints: ta.name_constraints,
+        })
+        .collect();
+
     end_entity_cert.verify_is_valid_tls_server_cert(
         &[],
-        &TLS_SERVER_ROOTS,
+        &webpki::TlsServerTrustAnchors(&trust_anchors),
         &intermediates,
         time,
     )?;
