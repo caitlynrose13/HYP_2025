@@ -8,8 +8,6 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-mod services;
-
 async fn health_check() -> AxumJson<serde_json::Value> {
     AxumJson(json!({
         "status": "healthy",

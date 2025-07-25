@@ -1,16 +1,16 @@
 use crate::services::certificate_parser::parse_certificate;
-use crate::services::security_grader::{GradeInput, grade_site};
+use crate::services::security_grader::GradeInput;
 use crate::services::tls_parser::TlsVersion;
 use axum::{Json, http::StatusCode};
 use chrono;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct AssessmentRequest {
     pub domain: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct AssessmentResponse {
     pub domain: String,
     pub message: String,
@@ -20,9 +20,10 @@ pub struct AssessmentResponse {
     pub cipher_suites: CipherSuiteInfo,
     pub vulnerabilities: VulnerabilityInfo,
     pub key_exchange: KeyExchangeInfo,
+    pub explanation: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct CertificateInfo {
     pub common_name: Option<String>,
     pub issuer: Option<String>,
@@ -36,7 +37,7 @@ pub struct CertificateInfo {
     pub serial_number: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct ProtocolSupport {
     pub tls_1_0: String,
     pub tls_1_1: String,
@@ -44,14 +45,14 @@ pub struct ProtocolSupport {
     pub tls_1_3: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct CipherSuiteInfo {
     pub tls_1_2_suites: Vec<String>,
     pub tls_1_3_suites: Vec<String>,
     pub preferred_suite: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct VulnerabilityInfo {
     pub poodle: String,
     pub beast: String,
@@ -60,7 +61,7 @@ pub struct VulnerabilityInfo {
     pub logjam: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct KeyExchangeInfo {
     pub supports_forward_secrecy: bool,
     pub key_exchange_algorithm: Option<String>,
@@ -83,16 +84,7 @@ pub async fn assess_domain(
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
 
-    // Test TLS 1.2 support
-    let tls12_result =
-        crate::services::tls_handshake::client_handshake::perform_tls_handshake_full_with_cert(
-            &domain,
-            TlsVersion::TLS1_2,
-        );
-
-    // Test TLS 1.3 support
-    let tls13_result = crate::services::tls_handshake::tls13::client::test_tls13(&domain);
-
+    // Prepare all info structs
     let mut protocols = ProtocolSupport {
         tls_1_0: "Not Tested".to_string(),
         tls_1_1: "Not Tested".to_string(),
@@ -133,6 +125,13 @@ pub async fn assess_domain(
         curve_name: None,
     };
 
+    // Basic HSTS detection: try to fetch HTTPS headers and check for Strict-Transport-Security
+    let mut hsts_supported = false;
+    if let Ok(resp) = reqwest::blocking::get(format!("https://{}", domain)) {
+        if let Some(hsts) = resp.headers().get("strict-transport-security") {
+            hsts_supported = true;
+        }
+    }
     let mut grade_input = GradeInput {
         tls13_supported: false,
         tls12_supported: false,
@@ -140,10 +139,60 @@ pub async fn assess_domain(
         tls10_supported: false, // We don't test these, so assume false
         cipher_is_strong: false,
         cert_valid: false,
-        hsts: false, // TODO: Implement HSTS detection
+        hsts: hsts_supported,
         forward_secrecy: false,
         weak_protocols_disabled: true, // Since we don't support TLS 1.0/1.1
     };
+
+    // Check cache first (with all assessment details)
+    // WHOIS integration: fetch WHOIS and pass to grading
+    let whois_resp = crate::services::security_grader::whois_query(&domain).ok();
+    let (grade, cached) = crate::services::security_grader::get_or_run_scan(
+        &domain,
+        &grade_input,
+        &certificate_info,
+        &protocols,
+        &cipher_suites,
+        &vulnerabilities,
+        &key_exchange,
+        whois_resp.as_deref(),
+    );
+    let explanation = {
+        // Try to get explanation from cache or grading result
+        let cache = crate::services::security_grader::load_cache();
+        cache
+            .get(&domain)
+            .and_then(|entry| entry.explanation.clone())
+    };
+    if cached {
+        println!("✓ Loaded cached result for {}", domain);
+        println!("Final Grade: {:?}", grade);
+        println!("=== Assessment Complete ===\n");
+        return (
+            StatusCode::OK,
+            Json(AssessmentResponse {
+                domain,
+                message: "TLS assessment loaded from cache".to_string(),
+                grade: Some(format!("{:?}", grade)),
+                certificate: certificate_info,
+                protocols,
+                cipher_suites,
+                vulnerabilities,
+                key_exchange,
+                explanation,
+            }),
+        );
+    }
+
+    // Test TLS 1.2 support
+    let tls12_result =
+        crate::services::tls_handshake::client_handshake::perform_tls_handshake_full_with_cert(
+            &domain,
+            TlsVersion::TLS1_2,
+        );
+
+    // Test TLS 1.3 support
+    let tls13_result = crate::services::tls_handshake::tls13::client::test_tls13(&domain);
 
     match tls12_result {
         Ok((state, cert_der)) => {
@@ -219,7 +268,19 @@ pub async fn assess_domain(
         }
     }
 
-    let grade = grade_site(&grade_input);
+    let (grade, cached) = crate::services::security_grader::get_or_run_scan(
+        &domain,
+        &grade_input,
+        &certificate_info,
+        &protocols,
+        &cipher_suites,
+        &vulnerabilities,
+        &key_exchange,
+        None,
+    );
+    if cached {
+        println!("✓ Loaded cached result for {}", domain);
+    }
     println!("Final Grade: {:?}", grade);
     println!("=== Assessment Complete ===\n");
 
@@ -239,6 +300,7 @@ pub async fn assess_domain(
             cipher_suites,
             vulnerabilities,
             key_exchange,
+            explanation,
         }),
     )
 }
