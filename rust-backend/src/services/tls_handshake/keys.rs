@@ -1,23 +1,29 @@
+// =============================
+// Removed x25519_dalek EphemeralSecret and PublicKey
+// Imports
+// =============================
+use crate::services::errors::TlsError;
+use crate::services::tls_parser::{CipherSuite, TlsContentType, TlsVersion};
 use aes::{Aes128, Aes256};
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{AesGcm, KeyInit};
 use hmac::{Hmac, Mac};
-use ring::hkdf::{self, HKDF_SHA256, Prk, Salt};
-use sha2::{Digest, Sha256, Sha384};
-
-use crate::services::errors::TlsError;
-use crate::services::tls_parser::{CipherSuite, TlsContentType, TlsVersion};
+use ring::hkdf::{HKDF_SHA256, KeyType, Prk, Salt};
+use sha2::digest::Digest;
+use sha2::{Sha256, Sha384};
 use typenum::{U12, U16};
-/// HKDF-Extract for TLS 1.3 (RFC 8446)
+
+// =============================
+// TLS 1.3 Key Schedule & HKDF
+/// HKDF-Extract for TLS 1.3 (RFC 8446) - static SHA-256 version
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<ring::hkdf::Prk, TlsError> {
-    use ring::hkdf::{HKDF_SHA256, Salt};
     let salt = Salt::new(HKDF_SHA256, salt);
     let prk = salt.extract(ikm);
     Ok(prk)
 }
 
-/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1)
+/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1) - static SHA-256 version
 pub fn hkdf_expand_label(
     prk: &ring::hkdf::Prk,
     label: &[u8],
@@ -37,7 +43,7 @@ pub fn hkdf_expand_label(
     let info_slice = info.as_slice();
     let info_ref = [info_slice];
     struct OkmLen(usize);
-    impl ring::hkdf::KeyType for OkmLen {
+    impl KeyType for OkmLen {
         fn len(&self) -> usize {
             self.0
         }
@@ -49,19 +55,112 @@ pub fn hkdf_expand_label(
     okm.fill(&mut out)
         .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
 
-    // --- RFC debug prints ---
-    println!("[RFC CHECK] HKDF label: {}", String::from_utf8_lossy(label));
-    println!(
-        "[RFC CHECK] HKDF full_label (hex): {}",
-        hex::encode(&full_label)
-    );
-    println!("[RFC CHECK] HKDF context (hex): {}", hex::encode(context));
-    println!("[RFC CHECK] HKDF info (hex): {}", hex::encode(&info));
-    println!("[RFC CHECK] HKDF output (hex): {}", hex::encode(&out));
-    // ------------------------
+    Ok(out)
+}
+// =============================
+
+/// HKDF-Extract for TLS 1.3 (RFC 8446) with dynamic hash selection
+pub fn hkdf_extract_dynamic(salt: &[u8], ikm: &[u8], use_sha384: bool) -> Prk {
+    let algorithm = if use_sha384 {
+        ring::hkdf::HKDF_SHA384
+    } else {
+        ring::hkdf::HKDF_SHA256
+    };
+    Salt::new(algorithm, salt).extract(ikm)
+}
+
+/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1) with dynamic hash selection
+pub fn hkdf_expand_label_dynamic(
+    prk: &Prk,
+    label: &[u8],
+    context: &[u8],
+    length: usize,
+    _use_sha384: bool,
+) -> Result<Vec<u8>, TlsError> {
+    let mut full_label = b"tls13 ".to_vec();
+    full_label.extend_from_slice(label);
+
+    let mut info = Vec::with_capacity(2 + 1 + full_label.len() + 1 + context.len());
+    info.extend_from_slice(&(length as u16).to_be_bytes()); // Length of output key material (L)
+    info.push(full_label.len() as u8); // Length of label (Lk)
+    info.extend_from_slice(&full_label); // Key label
+    info.push(context.len() as u8); // Length of context (Lc)
+    info.extend_from_slice(context); // Context
+
+    struct OkmLen(usize);
+    impl ring::hkdf::KeyType for OkmLen {
+        fn len(&self) -> usize {
+            self.0
+        }
+    }
+
+    let info_ref = [info.as_slice()];
+    let okm = prk
+        .expand(&info_ref, OkmLen(length))
+        .map_err(|_| TlsError::KeyDerivationError("HKDF expand error".into()))?;
+    let mut out = vec![0u8; length];
+    okm.fill(&mut out)
+        .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
 
     Ok(out)
 }
+
+/// TLS 1.3 Key Schedule: Derive handshake traffic secrets (RFC 8446)
+/// Selects SHA256/SHA384 and HKDF variant based on cipher suite
+pub fn derive_tls13_handshake_traffic_secrets_dynamic(
+    shared_secret: &[u8],
+    transcript_hash: &[u8],
+    use_sha384: bool,
+) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
+    // RFC: early_secret = HKDF-Extract(zeros, ikm)
+    let zeroes = if use_sha384 {
+        vec![0u8; 48]
+    } else {
+        vec![0u8; 32]
+    };
+    let early_secret_prk = hkdf_extract_dynamic(&zeroes, &zeroes, use_sha384);
+    // RFC: empty_hash = Hash("")
+    let empty_hash = if use_sha384 {
+        let mut hasher = Sha384::default();
+        hasher.update(&[]);
+        hasher.finalize().to_vec()
+    } else {
+        let mut hasher = Sha256::default();
+        hasher.update(&[]);
+        hasher.finalize().to_vec()
+    };
+    // RFC: derived_secret = HKDF-Expand-Label(early_secret, "derived", empty_hash, hash_len)
+    let hash_len = if use_sha384 { 48 } else { 32 };
+    let derived_secret = hkdf_expand_label_dynamic(
+        &early_secret_prk,
+        b"derived",
+        &empty_hash,
+        hash_len,
+        use_sha384,
+    )?;
+    // RFC: handshake_secret = HKDF-Extract(derived_secret, shared_secret)
+    let handshake_secret_prk = hkdf_extract_dynamic(&derived_secret, shared_secret, use_sha384);
+    // RFC: client/server handshake traffic secrets
+    let client_hs_traffic_secret = hkdf_expand_label_dynamic(
+        &handshake_secret_prk,
+        b"c hs traffic",
+        transcript_hash,
+        hash_len,
+        use_sha384,
+    )?;
+    let server_hs_traffic_secret = hkdf_expand_label_dynamic(
+        &handshake_secret_prk,
+        b"s hs traffic",
+        transcript_hash,
+        hash_len,
+        use_sha384,
+    )?;
+    Ok((client_hs_traffic_secret, server_hs_traffic_secret))
+}
+
+// =============================
+// TLS 1.2 Key Schedule & PRF
+// =============================
 
 //  AEAD Cipher Enum
 #[derive(Clone)]
@@ -499,7 +598,7 @@ pub fn derive_hkdf_keys(
     output_len: usize,
 ) -> Result<Vec<u8>, TlsError> {
     struct OkmLen(usize);
-    impl hkdf::KeyType for OkmLen {
+    impl KeyType for OkmLen {
         fn len(&self) -> usize {
             self.0
         }
@@ -521,15 +620,7 @@ pub fn derive_hkdf_keys(
     Ok(output)
 }
 
-// X25519 keypair generation
-pub fn generate_x25519_keypair() -> (x25519_dalek::EphemeralSecret, [u8; 32]) {
-    use rand::rngs::OsRng;
-    use x25519_dalek::{EphemeralSecret, PublicKey};
-    let secret = EphemeralSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&secret);
-    let pub_bytes = public.to_bytes();
-    (secret, pub_bytes)
-}
+// X25519 keypair generation removed
 
 // P-256 keypair generation
 pub fn generate_p256_keyshare() -> ([u8; 65], p256::ecdh::EphemeralSecret) {

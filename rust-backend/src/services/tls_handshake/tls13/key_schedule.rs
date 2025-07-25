@@ -1,132 +1,136 @@
 use crate::services::errors::TlsError;
-use crate::services::tls_handshake::keys::hkdf_extract;
-use ring::hkdf::{HKDF_SHA256, Prk, Salt};
-use x25519_dalek::{EphemeralSecret, PublicKey};
-
-/// Perform X25519 key exchange to derive shared secret (TLS 1.3)
-pub fn perform_x25519_key_exchange(
-    client_secret: EphemeralSecret,
-    server_public: &[u8; 32],
-) -> [u8; 32] {
-    let server_pub = PublicKey::from(*server_public);
-    let shared = client_secret.diffie_hellman(&server_pub);
-    shared.to_bytes()
-}
+use crate::services::tls_handshake::keys::{hkdf_expand_label_dynamic, hkdf_extract_dynamic};
+use crate::services::tls_handshake::tls13::transcript::{TranscriptHash, TranscriptHashAlgorithm};
+use hmac::{Hmac, Mac};
+use ring::hkdf::Prk;
+use sha2::Digest;
+use sha2::{Sha256, Sha384};
 
 /// Implements the TLS 1.3 key schedule for handshake traffic secrets.
 /// See RFC 8446, Section 7.1 and 7.2.
-pub fn derive_tls13_handshake_traffic_secrets(
-    shared_secret: &[u8],   // output of X25519
-    transcript_hash: &[u8], // hash of all handshake messages so far
+/// use_sha384: true for TLS_AES_256_GCM_SHA384, false for others
+
+/// Refactored: Accepts TranscriptHashAlgorithm, uses correct hash/HKDF for handshake secrets
+pub fn derive_tls13_handshake_traffic_secrets_dynamic(
+    shared_secret: &[u8],
+    transcript: &TranscriptHash,
+    hash_alg: TranscriptHashAlgorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
-    // 1. Early Secret (for non-PSK, this is HKDF-Extract with salt=0, IKM=empty)
-    let zeroes = [0u8; 32];
-    let early_secret_prk = hkdf_extract(&zeroes, &[])?;
-
-    // 2. Derive-Secret for handshake
-    // RFC 8446: For "derived" secret, we need to hash an empty string with SHA256
-    let empty_hash = {
-        use sha2::{Digest, Sha256};
-        let hasher = Sha256::new();
-        let result = hasher.finalize();
-        result.to_vec()
+    let use_sha384 = matches!(hash_alg, TranscriptHashAlgorithm::Sha384);
+    let zeroes = if use_sha384 {
+        vec![0u8; 48]
+    } else {
+        vec![0u8; 32]
     };
-
-    let derived_secret = {
-        // Use the corrected hkdf_expand_label function from keys.rs which includes "tls13" prefix
-        crate::services::tls_handshake::keys::hkdf_expand_label(
-            &early_secret_prk,
-            b"derived",
-            &empty_hash,
-            32,
-        )?
+    // RFC 8446: Early-Secret = HKDF-Extract(salt=0, IKM=0)
+    let early_secret_prk = hkdf_extract_dynamic(&zeroes, &zeroes, use_sha384);
+    // RFC: empty_hash = Hash("")
+    let empty_hash = match hash_alg {
+        TranscriptHashAlgorithm::Sha256 => {
+            let mut h = sha2::Sha256::new();
+            h.update(&[]);
+            h.finalize().to_vec()
+        }
+        TranscriptHashAlgorithm::Sha384 => {
+            let mut h = sha2::Sha384::new();
+            h.update(&[]);
+            h.finalize().to_vec()
+        }
     };
-
-    // 3. Handshake Secret (HKDF-Extract with salt=derived_secret, IKM=shared_secret)
-    let handshake_salt = Salt::new(HKDF_SHA256, &derived_secret);
-    let handshake_secret_prk = handshake_salt.extract(shared_secret);
-
-    // 4. Derive client/server handshake traffic secrets using HKDF-Expand-Label
-    // RFC 8446: "c hs traffic" and "s hs traffic" - use the corrected function
-    let client_hs_traffic_secret = crate::services::tls_handshake::keys::hkdf_expand_label(
+    let hash_len = if use_sha384 { 48 } else { 32 };
+    let derived_secret = hkdf_expand_label_dynamic(
+        &early_secret_prk,
+        b"derived",
+        &empty_hash,
+        hash_len,
+        use_sha384,
+    )?;
+    let handshake_secret_prk = hkdf_extract_dynamic(&derived_secret, shared_secret, use_sha384);
+    let transcript_hash = transcript
+        .clone_hash()
+        .map_err(|e| TlsError::KeyDerivationError(e.to_string()))?;
+    let client_hs_traffic_secret = hkdf_expand_label_dynamic(
         &handshake_secret_prk,
         b"c hs traffic",
-        transcript_hash,
-        32,
+        &transcript_hash,
+        hash_len,
+        use_sha384,
     )?;
-    let server_hs_traffic_secret = crate::services::tls_handshake::keys::hkdf_expand_label(
+    let server_hs_traffic_secret = hkdf_expand_label_dynamic(
         &handshake_secret_prk,
         b"s hs traffic",
-        transcript_hash,
-        32,
+        &transcript_hash,
+        hash_len,
+        use_sha384,
     )?;
-
     Ok((client_hs_traffic_secret, server_hs_traffic_secret))
 }
 
 /// Derive TLS 1.3 application traffic secrets from handshake secret and final transcript
 /// This follows the same pattern as handshake traffic secrets but uses "application" labels
 /// and the final transcript hash (including all handshake messages up to Finished)
+
+/// Refactored: Accepts TranscriptHash, uses correct hash/HKDF for application secrets
 pub fn derive_tls13_application_traffic_secrets(
-    shared_secret: &[u8],         // Same as handshake derivation
-    final_transcript_hash: &[u8], // hash including all handshake messages up to and including Finished
+    shared_secret: &[u8],
+    transcript: &TranscriptHash,
+    hash_alg: TranscriptHashAlgorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
-    // First, we need to derive the handshake secret again (or pass it in)
-    // For now, let's derive it again following the same process as handshake traffic secrets
-    let zeroes = [0u8; 32];
-    let early_secret_prk = hkdf_extract(&zeroes, &[])?;
-
-    let empty_hash = {
-        use sha2::{Digest, Sha256};
-        let hasher = Sha256::new();
-        let result = hasher.finalize();
-        result.to_vec()
+    let use_sha384 = matches!(hash_alg, TranscriptHashAlgorithm::Sha384);
+    let zeroes = if use_sha384 {
+        vec![0u8; 48]
+    } else {
+        vec![0u8; 32]
     };
-
-    let derived_secret = crate::services::tls_handshake::keys::hkdf_expand_label(
+    // RFC 8446: Early-Secret = HKDF-Extract(salt=0, IKM=0)
+    let early_secret_prk = hkdf_extract_dynamic(&zeroes, &zeroes, use_sha384);
+    let empty_hash = match hash_alg {
+        TranscriptHashAlgorithm::Sha256 => {
+            let mut h = sha2::Sha256::new();
+            h.update(&[]);
+            h.finalize().to_vec()
+        }
+        TranscriptHashAlgorithm::Sha384 => {
+            let mut h = sha2::Sha384::new();
+            h.update(&[]);
+            h.finalize().to_vec()
+        }
+    };
+    let hash_len = if use_sha384 { 48 } else { 32 };
+    let derived_secret = hkdf_expand_label_dynamic(
         &early_secret_prk,
         b"derived",
         &empty_hash,
-        32,
+        hash_len,
+        use_sha384,
     )?;
-
-    let handshake_salt = Salt::new(HKDF_SHA256, &derived_secret);
-    let handshake_secret_prk = handshake_salt.extract(shared_secret);
-
-    // Now derive the main secret from handshake secret
-    let empty_hash_for_main = {
-        use sha2::{Digest, Sha256};
-        let hasher = Sha256::new();
-        let result = hasher.finalize();
-        result.to_vec()
-    };
-
-    let derived_for_main = crate::services::tls_handshake::keys::hkdf_expand_label(
+    let handshake_secret_prk = hkdf_extract_dynamic(&derived_secret, shared_secret, use_sha384);
+    // Main secret (RFC 8446: master_secret = HKDF-Extract(derived, 0))
+    let derived_for_main = hkdf_expand_label_dynamic(
         &handshake_secret_prk,
         b"derived",
-        &empty_hash_for_main,
-        32,
+        &empty_hash,
+        hash_len,
+        use_sha384,
     )?;
-
-    // Main Secret = HKDF-Extract(derived_for_main, 0)
-    let main_secret_salt = Salt::new(HKDF_SHA256, &derived_for_main);
-    let main_secret_prk = main_secret_salt.extract(&[0u8; 32]);
-
-    // 2. Derive application traffic secrets using HKDF-Expand-Label
-    // RFC 8446: "c ap traffic" and "s ap traffic"
-    let client_app_traffic_secret = crate::services::tls_handshake::keys::hkdf_expand_label(
+    let main_secret_prk = hkdf_extract_dynamic(&derived_for_main, &vec![0u8; hash_len], use_sha384);
+    let transcript_hash = transcript
+        .clone_hash()
+        .map_err(|e| TlsError::KeyDerivationError(e.to_string()))?;
+    let client_app_traffic_secret = hkdf_expand_label_dynamic(
         &main_secret_prk,
         b"c ap traffic",
-        final_transcript_hash,
-        32,
+        &transcript_hash,
+        hash_len,
+        use_sha384,
     )?;
-    let server_app_traffic_secret = crate::services::tls_handshake::keys::hkdf_expand_label(
+    let server_app_traffic_secret = hkdf_expand_label_dynamic(
         &main_secret_prk,
         b"s ap traffic",
-        final_transcript_hash,
-        32,
+        &transcript_hash,
+        hash_len,
+        use_sha384,
     )?;
-
     Ok((client_app_traffic_secret, server_app_traffic_secret))
 }
 
@@ -136,46 +140,43 @@ pub fn derive_tls13_application_traffic_secrets(
 pub fn derive_tls13_finished_key_and_verify(
     traffic_secret: &[u8],
     transcript_hash: &[u8],
+
+    hash_alg: TranscriptHashAlgorithm,
     received_verify_data: &[u8],
 ) -> Result<bool, TlsError> {
-    // 1. Derive the finished key from the traffic secret
-    let prk = ring::hkdf::Prk::new_less_safe(ring::hkdf::HKDF_SHA256, traffic_secret);
-    let finished_key = crate::services::tls_handshake::keys::hkdf_expand_label(
-        &prk,
-        b"finished",
-        &[], // Empty context for finished key
-        32,  // SHA256 hash length
-    )?;
-
-    // 2. Calculate the expected verify_data using HMAC
-    let expected_verify_data = {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(&finished_key)
-            .map_err(|_| TlsError::KeyDerivationError("Invalid finished key length".to_string()))?;
-        mac.update(transcript_hash);
-        mac.finalize().into_bytes().to_vec()
+    let hash_len = match hash_alg {
+        TranscriptHashAlgorithm::Sha256 => 32,
+        TranscriptHashAlgorithm::Sha384 => 48,
     };
 
-    // 3. Compare the received and expected verify_data
-    let is_valid = received_verify_data == expected_verify_data;
+    let prk = match hash_alg {
+        TranscriptHashAlgorithm::Sha256 => {
+            ring::hkdf::Prk::new_less_safe(ring::hkdf::HKDF_SHA256, traffic_secret)
+        }
+        TranscriptHashAlgorithm::Sha384 => {
+            ring::hkdf::Prk::new_less_safe(ring::hkdf::HKDF_SHA384, traffic_secret)
+        }
+    };
 
-    if is_valid {
-        println!("[TLS13_FINISHED] ✅ Finished message MAC verification PASSED");
-    } else {
-        println!("[TLS13_FINISHED] ❌ Finished message MAC verification FAILED");
-        println!(
-            "[TLS13_FINISHED] Expected: {}",
-            hex::encode(&expected_verify_data)
-        );
-        println!(
-            "[TLS13_FINISHED] Received: {}",
-            hex::encode(received_verify_data)
-        );
-    }
+    let finished_key =
+        crate::services::tls_handshake::keys::hkdf_expand_label(&prk, b"finished", &[], hash_len)?;
 
-    Ok(is_valid)
+    let expected_verify_data = match hash_alg {
+        TranscriptHashAlgorithm::Sha256 => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(&finished_key)
+                .map_err(|_| TlsError::KeyDerivationError("Invalid HMAC length".into()))?;
+            mac.update(transcript_hash);
+            mac.finalize().into_bytes().to_vec()
+        }
+        TranscriptHashAlgorithm::Sha384 => {
+            let mut mac = Hmac::<Sha384>::new_from_slice(&finished_key)
+                .map_err(|_| TlsError::KeyDerivationError("Invalid HMAC length".into()))?;
+            mac.update(transcript_hash);
+            mac.finalize().into_bytes().to_vec()
+        }
+    };
+
+    Ok(received_verify_data == expected_verify_data)
 }
 
 /// Helper to construct the TLS 1.3 HKDFLabel structure

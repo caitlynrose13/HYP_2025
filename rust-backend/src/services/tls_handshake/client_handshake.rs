@@ -15,7 +15,6 @@ use crate::services::tls_handshake::keys::TlsAeadCipher;
 use crate::services::tls_parser::{
     CipherSuite, HandshakeMessageType, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TlsContentType, TlsParserError, TlsRecord, TlsVersion,
-    parse_tls_alert,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -456,6 +455,7 @@ pub fn perform_tls_handshake_full_with_cert(
         ));
     }
 
+    let handshake_hash = Sha256::digest(&handshake_transcript);
     Ok((
         TlsConnectionState {
             master_secret: master_secret.to_vec(),
@@ -469,7 +469,7 @@ pub fn perform_tls_handshake_full_with_cert(
             negotiated_tls_version: TlsVersion::TLS1_2,
             client_random,
             server_random: server_hello_parsed.server_random,
-            handshake_hash: Sha256::digest(&handshake_transcript).into(),
+            handshake_hash: handshake_hash.into(),
         },
         first_cert,
     ))
@@ -568,65 +568,16 @@ pub fn read_tls_record<R: Read>(
         payload,
     };
 
-    // If this is an alert record, parse and display the alert details
-    if record.content_type == TlsContentType::Alert {
-        match parse_tls_alert(&record.payload) {
-            Ok(alert) => {
-                println!("{}", alert.to_string());
-            }
-            Err(e) => {
-                println!("Failed to parse alert: {:?}", e);
-            }
-        }
-    }
+    // If this is an alert record, parse and ignore the alert details (no output)
+    // You may wish to log or handle alerts here in future, but no println! output.
 
     Ok(record)
 }
 
-//test the tls security level of the server => currently only 1.2
-pub fn probe_tls_security_level(domain: &str) -> TlsSecurityLevel {
-    println!("Probing {} for TLS security level...", domain);
+// probe_tls_security_level removed for clean test API
 
-    println!("    Testing TLS 1.2...");
-    match perform_tls_handshake_full(domain, TlsVersion::TLS1_2) {
-        Ok(connection_state) => {
-            println!("    ✓ TLS 1.2 - SUPPORTED");
-            println!(
-                "      Negotiated cipher: {}",
-                connection_state.negotiated_cipher_suite.name
-            );
-            return TlsSecurityLevel::Modern;
-        }
-        Err(e) => {
-            println!("    ✗ TLS 1.2 - FAILED: {:?}", e);
-            if let TlsError::ParserError(parser_error) = &e {
-                if let crate::services::tls_parser::TlsParserError::InvalidVersion(major, minor) =
-                    parser_error
-                {
-                    println!(
-                        "      Server responded with version {}.{:02X} - requesting downgrade",
-                        major, minor
-                    );
-                    return TlsSecurityLevel::Deprecated;
-                }
-            }
-        }
-    }
-
-    println!("    TLS 1.3 not yet implemented - assuming deprecated if TLS 1.2 failed");
-    TlsSecurityLevel::Deprecated
-}
-
-/// Test function to perform a TLS 1.2 handshake with google.com
-/// This function is called from main.rs to ensure the TLS 1.2 code is used
-pub fn test_tls12_handshake_to_google() {
-    let domain = "google.com";
-    match perform_tls_handshake_full(domain, TlsVersion::TLS1_2) {
-        Ok(_) => {
-            println!("TLS 1.2 handshake completed successfully with {}", domain);
-        }
-        Err(e) => {
-            println!("TLS 1.2 handshake failed: {:?}", e);
-        }
-    }
+/// Clean test function to perform a TLS 1.2 handshake with any domain
+/// Returns Ok(()) if handshake succeeds, Err(TlsError) otherwise. No output.
+pub fn test_tls12(domain: &str) -> Result<(), TlsError> {
+    perform_tls_handshake_full(domain, TlsVersion::TLS1_2).map(|_| ())
 }

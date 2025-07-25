@@ -220,9 +220,14 @@ impl HandshakeMessage {
         ))
     }
 
-    pub fn build_change_cipher_spec() -> Vec<u8> {
-        // ChangeCipherSpec is a simple 1-byte message: 0x01
-        vec![0x01]
+    // ========================= ChangeCipherSpec Message =========================
+    /// Build a ChangeCipherSpec TLS record (standard format)
+    pub fn build_change_cipher_spec_record() -> Vec<u8> {
+        Self::build_tls_record(
+            TlsContentType::ChangeCipherSpec,
+            TlsVersion::TLS1_2,
+            vec![0x01],
+        )
     }
 }
 
@@ -238,11 +243,6 @@ pub fn handle_server_hello_flight(
     ),
     TlsError,
 > {
-    println!(
-        "Attempting to parse server response of {} bytes.",
-        server_response_buffer.len()
-    );
-    println!("Waiting for server response...");
     let mut cursor = Cursor::new(server_response_buffer);
 
     let mut server_hello: Option<ServerHelloParsed> = None;
@@ -254,41 +254,14 @@ pub fn handle_server_hello_flight(
     // Keep parsing records until no more data or ServerHelloDone is found
     while let Some(record) = parse_tls_record(&mut cursor)? {
         records_processed += 1;
-        println!(
-            "Read {} bytes from server (record {})",
-            record.payload.len(),
-            records_processed
-        );
-        println!("  Record content type: {:?}", record.content_type);
-
         match record.content_type {
             TlsContentType::Handshake => {
-                // Parse multiple handshake messages
                 let handshake_messages = parse_handshake_messages(&record.payload)?;
-                println!(
-                    "  Parsed {} handshake message(s) in this record:",
-                    handshake_messages.len()
-                );
-
-                for (i, msg) in handshake_messages.iter().enumerate() {
-                    println!(
-                        "    Handshake message {}: {:?} (type=0x{:02X}, len={}, raw={})",
-                        i + 1,
-                        msg.msg_type,
-                        msg.msg_type.as_u8(),
-                        msg.length,
-                        hex::encode(&msg.raw_bytes)
-                    );
-                }
-
                 for msg in handshake_messages {
-                    // Append the raw bytes of this handshake message to the transcript hash
                     handshake_transcript_hash.extend_from_slice(&msg.raw_bytes);
-
                     match msg.msg_type {
                         HandshakeMessageType::ServerHello => {
                             if server_hello.is_some() {
-                                // Already received ServerHello, unexpected
                                 return Err(TlsError::ParserError(
                                     TlsParserError::MalformedMessage(
                                         "Duplicate ServerHello message received".to_string(),
@@ -296,117 +269,68 @@ pub fn handle_server_hello_flight(
                                 ));
                             }
                             let parsed = parse_server_hello_content(&msg.payload)?;
-                            println!(
-                                "  Parsed ServerHello: chosen cipher suite = {:02X}{:02X}",
-                                parsed.chosen_cipher_suite[0], parsed.chosen_cipher_suite[1]
-                            );
                             server_hello = Some(parsed);
                         }
                         HandshakeMessageType::Certificate => {
                             if certificates.is_some() {
-                                // Already received Certificate, unexpected
                                 return Err(TlsError::ParserError(
                                     TlsParserError::MalformedMessage(
                                         "Duplicate Certificate message received".to_string(),
                                     ),
                                 ));
                             }
-                            println!("  Found Certificate message.");
                             certificates = Some(parse_certificate_list(&msg.payload)?);
                         }
                         HandshakeMessageType::ServerKeyExchange => {
                             if server_key_exchange.is_some() {
-                                // Already received ServerKeyExchange, unexpected
                                 return Err(TlsError::ParserError(
                                     TlsParserError::MalformedMessage(
                                         "Duplicate ServerKeyExchange message received".to_string(),
                                     ),
                                 ));
                             }
-                            println!("  Found ServerKeyExchange message.");
                             server_key_exchange =
                                 Some(parse_server_key_exchange_content(&msg.payload)?);
                         }
                         HandshakeMessageType::ServerHelloDone => {
-                            println!("  Found ServerHelloDone message.");
                             server_hello_done_received = true;
-                            break; // Done with this flight
+                            break;
                         }
-                        // Handle other unexpected handshake messages if necessary
-                        _ => {
-                            println!("  Unhandled handshake message type: {:?}", msg.msg_type);
-                        }
+                        _ => {}
                     }
                 }
             }
-            TlsContentType::ChangeCipherSpec => {
-                println!("  Received ChangeCipherSpec record in Server Hello Flight");
-            }
-            TlsContentType::Alert => {
-                println!("  Received Alert record during Server Hello Flight");
-                match parse_tls_alert(&record.payload) {
-                    Ok(alert) => {
-                        println!("  {}", alert.to_string());
-                        return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
-                            format!(
-                                "Received {} Alert: {}",
-                                alert.get_level_name(),
-                                alert.get_description_name()
-                            ),
-                        )));
-                    }
-                    Err(e) => {
-                        println!("  Failed to parse alert: {:?}", e);
-                        return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
-                            "Received Alert record during Server Hello Flight (failed to parse)"
-                                .to_string(),
-                        )));
-                    }
+            TlsContentType::ChangeCipherSpec => {}
+            TlsContentType::Alert => match parse_tls_alert(&record.payload) {
+                Ok(alert) => {
+                    return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
+                        format!(
+                            "Received {} Alert: {}",
+                            alert.get_level_name(),
+                            alert.get_description_name()
+                        ),
+                    )));
                 }
-            }
-            _ => {
-                println!(
-                    "  Unhandled TLS Content Type: {:?} in Server Hello Flight",
-                    record.content_type
-                );
-            }
+                Err(_e) => {
+                    return Err(TlsError::ParserError(TlsParserError::MalformedMessage(
+                        "Received Alert record during Server Hello Flight (failed to parse)"
+                            .to_string(),
+                    )));
+                }
+            },
+            _ => {}
         }
-
-        // Stop parsing ifhave ServerHelloDone or if  processed enough records
         if server_hello_done_received {
             break;
         }
-
         if records_processed >= 2 && server_hello.is_some() {
-            println!(
-                "Processed {} records, have ServerHello, stopping ServerHello flight parsing",
-                records_processed
-            );
             break;
         }
     }
-
-    // Validate that all expected messages were received
     let sh_parsed = server_hello.ok_or(TlsError::ParserError(TlsParserError::MalformedMessage(
         "ServerHello not received".to_string(),
     )))?;
-
-    let certs = certificates.unwrap_or_else(|| {
-        println!("Warning: No Certificate message received in ServerHello flight");
-        Vec::new()
-    });
-    // Make ServerHelloDone optional for servers that don't follow strict TLS 1.2 patterns
-    if !server_hello_done_received && records_processed < 2 {
-        println!("Warning: ServerHelloDone not received, but continuing with handshake");
-    }
-
-    if server_key_exchange.is_none() {
-        println!("DEBUG: ServerKeyExchange message was NOT found in the handshake messages!");
-    } else {
-        println!("DEBUG: ServerKeyExchange message was found and parsed.");
-    }
-
-    // Return the parsed data
+    let certs = certificates.unwrap_or_else(|| Vec::new());
     Ok((sh_parsed, certs, server_key_exchange))
 }
 
@@ -483,11 +407,11 @@ pub fn read_tls_record<R: Read>(
     // If this is an alert record, parse and display the alert details
     if record.content_type == TlsContentType::Alert {
         match parse_tls_alert(&record.payload) {
-            Ok(alert) => {
-                println!("{}", alert.to_string());
+            Ok(_alert) => {
+                // Debug output removed
             }
-            Err(e) => {
-                println!("Failed to parse alert: {:?}", e);
+            Err(_e) => {
+                // Debug output removed
             }
         }
     }

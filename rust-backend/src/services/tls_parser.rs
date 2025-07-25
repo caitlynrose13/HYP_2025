@@ -1,17 +1,18 @@
 use super::errors::TlsError;
 use byteorder::{BigEndian, ReadBytesExt};
-use hex;
 use std::io::{Cursor, Read, Write}; // Ensure ReadBytesExt is used
 
-// TLS Versions
+// =========================
+// TLS Constants & Types
+// =========================
+
+// --- TLS Versions ---
 pub const TLS_1_2_MAJOR: u8 = 0x03;
 pub const TLS_1_2_MINOR: u8 = 0x03;
 
-// TLS Alert Levels
+// --- TLS Alert Levels & Descriptions ---
 pub const TLS_ALERT_LEVEL_WARNING: u8 = 0x01;
 pub const TLS_ALERT_LEVEL_FATAL: u8 = 0x02;
-
-// TLS Alert Descriptions
 pub const TLS_ALERT_CLOSE_NOTIFY: u8 = 0x00;
 pub const TLS_ALERT_UNEXPECTED_MESSAGE: u8 = 0x0a;
 pub const TLS_ALERT_BAD_RECORD_MAC: u8 = 0x14;
@@ -38,22 +39,22 @@ pub const TLS_ALERT_USER_CANCELED: u8 = 0x5a;
 pub const TLS_ALERT_NO_RENEGOTIATION: u8 = 0x64;
 pub const TLS_ALERT_UNSUPPORTED_EXTENSION: u8 = 0x6e;
 
-// ClientHello specific
+// --- ClientHello Specific ---
 pub const SESSION_ID_LEN_EMPTY: u8 = 0x00;
 pub const COMPRESSION_METHOD_NULL: u8 = 0x00;
-pub const COMPRESSION_METHODS_LEN: u8 = 0x01; // Length of the list of compression methods
+pub const COMPRESSION_METHODS_LEN: u8 = 0x01;
 
-// Extension Types (2 bytes)
+// --- Extension Types ---
 pub const EXTENSION_TYPE_SERVER_NAME: u16 = 0x0000;
 pub const EXTENSION_TYPE_SUPPORTED_GROUPS: u16 = 0x000A;
 pub const EXTENSION_TYPE_KEY_SHARE: u16 = 0x0033;
 pub const EXTENSION_TYPE_SUPPORTED_VERSIONS: u16 = 0x002B;
 pub const EXTENSION_TYPE_SIGNATURE_ALGORITHMS: u16 = 0x000D;
 
-// Server Name Indication (SNI)
+// --- SNI ---
 pub const SNI_HOSTNAME_TYPE: u8 = 0x00;
 
-// Signature Algorithms (2 bytes each)
+// --- Signature Algorithms ---
 pub const SIG_ALG_ECDSA_SECP256R1_SHA256: [u8; 2] = [0x04, 0x03];
 pub const SIG_ALG_RSA_PSS_RSAE_SHA256: [u8; 2] = [0x08, 0x04];
 pub const SIG_ALG_RSA_PSS_RSAE_SHA512: [u8; 2] = [0x08, 0x05];
@@ -254,7 +255,7 @@ impl TlsVersion {
     }
 }
 
-// --- New: NamedGroup Enum ---
+// --- TLS 1.3 NamedGroup Enum ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum NamedGroup {
@@ -284,7 +285,7 @@ impl NamedGroup {
     }
 }
 
-// --- New: Extension Struct ---
+// --- TLS Extension Struct ---
 #[derive(Debug, Clone)]
 pub struct Extension {
     pub extension_type: u16,
@@ -369,8 +370,7 @@ impl Extension {
     }
 }
 
-/// Parses a single TLS Extension from the provided cursor.
-/// Assumes the cursor is positioned at the start of an extension (type + length + payload).
+/// TLS Extension parser (used for TLS 1.3 ServerHello and EncryptedExtensions)
 pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsParserError> {
     let initial_pos = cursor.position() as usize;
     let remaining_bytes = cursor.get_ref().len() - initial_pos;
@@ -410,6 +410,7 @@ pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsP
     })
 }
 
+// --- TLS Handshake Message ---
 #[derive(Debug)]
 pub struct TlsHandshakeMessage {
     pub msg_type: HandshakeMessageType,
@@ -418,6 +419,7 @@ pub struct TlsHandshakeMessage {
     pub payload: Vec<u8>,
 }
 
+// --- TLS 1.2 ServerHello Parsed ---
 #[derive(Debug, Clone)]
 pub struct ServerHelloParsed {
     pub negotiated_tls_version: (u8, u8),
@@ -426,6 +428,7 @@ pub struct ServerHelloParsed {
     pub server_key_share_public: Option<Vec<u8>>,
 }
 
+// --- TLS 1.3 ServerHello Parsed ---
 #[derive(Debug, Clone, Default)]
 pub struct ServerHello13Parsed {
     // In TLS 1.3, the 'version' field in the record header and ServerHello
@@ -443,7 +446,9 @@ pub struct ServerHello13Parsed {
     pub selected_named_group: Option<NamedGroup>,   // Named group from KeyShare extension
 }
 
+// --- TLS 1.2 ServerKeyExchange Parsed ---
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ServerKeyExchangeParsed {
     pub curve_type: u8,
     pub named_curve: u16,
@@ -453,6 +458,7 @@ pub struct ServerKeyExchangeParsed {
     pub params_raw: Vec<u8>, // NEW: raw bytes from curve_type through public_key
 }
 
+// --- TLS CipherSuite ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CipherSuite {
     pub id: [u8; 2],
@@ -465,54 +471,83 @@ pub struct CipherSuite {
 
 impl CipherSuite {
     pub fn new(id1: u8, id2: u8) -> Self {
-        // Default to a TLS 1.3 AES-128-GCM-SHA256 cipher
-        CipherSuite {
-            id: [id1, id2],
-            name: "TLS_AES_128_GCM_SHA256",
-            key_length: 16,      // AES-128 key length
-            fixed_iv_length: 12, // TLS 1.3 GCM IV length
-            mac_key_length: 32,  // SHA-256 output length
-            hash_algorithm: HashAlgorithm::Sha256,
+        let id = [id1, id2];
+        match id {
+            [0x13, 0x01] => CipherSuite {
+                id,
+                name: "TLS_AES_128_GCM_SHA256",
+                key_length: 16,
+                fixed_iv_length: 12,
+                mac_key_length: 32,
+                hash_algorithm: HashAlgorithm::Sha256,
+            },
+            [0x13, 0x02] => CipherSuite {
+                id,
+                name: "TLS_AES_256_GCM_SHA384",
+                key_length: 32,
+                fixed_iv_length: 12,
+                mac_key_length: 48,
+                hash_algorithm: HashAlgorithm::Sha384,
+            },
+            [0x13, 0x03] => CipherSuite {
+                id,
+                name: "TLS_CHACHA20_POLY1305_SHA256",
+                key_length: 32,
+                fixed_iv_length: 12,
+                mac_key_length: 32,
+                hash_algorithm: HashAlgorithm::Sha256,
+            },
+            _ => CipherSuite {
+                id,
+                name: "UNKNOWN",
+                key_length: 0,
+                fixed_iv_length: 0,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha256,
+            },
         }
     }
 }
 
+// --- TLS HashAlgorithm ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgorithm {
     Sha256,
     Sha384, // Add SHA384 for TLS 1.2 PRF
 }
 
-// cipher suite
+// --- TLS CipherSuite Constants ---
+#[allow(dead_code)]
 pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite {
     id: [0xC0, 0x2F],
     name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-    key_length: 16,     // AES-128 uses 16-byte key
-    fixed_iv_length: 4, // GCM uses a 4-byte fixed_iv for TLS 1.2
-    mac_key_length: 0,  // GCM is an AEAD cipher, MAC is integrated, so 0 separate MAC key
+    key_length: 16,
+    fixed_iv_length: 4,
+    mac_key_length: 0,
     hash_algorithm: HashAlgorithm::Sha256,
 };
 
-// Add AES-256-GCM suite
+#[allow(dead_code)]
 pub const TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: CipherSuite = CipherSuite {
     id: [0xC0, 0x30],
     name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-    key_length: 32,                        // AES-256 uses 32-byte key
-    fixed_iv_length: 4,                    // GCM uses a 4-byte fixed_iv for TLS 1.2
-    mac_key_length: 0, // GCM is an AEAD cipher, MAC is integrated, so 0 separate MAC key
-    hash_algorithm: HashAlgorithm::Sha384, // Correct: use Sha384 for this suite
+    key_length: 32,
+    fixed_iv_length: 4,
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha384,
 };
 
-// Add ChaCha20-Poly1305 suite (commonly used by modern servers)
+#[allow(dead_code)]
 pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
     id: [0xCC, 0xA8],
     name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-    key_length: 32,                        // ChaCha20 uses 32-byte key
-    fixed_iv_length: 12,                   // Poly1305 uses 12-byte nonce
-    mac_key_length: 0,                     // Poly1305 is an AEAD cipher
-    hash_algorithm: HashAlgorithm::Sha256, // Uses SHA256
+    key_length: 32,
+    fixed_iv_length: 12,
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha256,
 };
 
+#[allow(dead_code)]
 pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<&'static CipherSuite> {
     if id == &TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.id {
         Some(&TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
@@ -525,6 +560,7 @@ pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<&'static CipherSuite> {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
     if payload.len() < 2 {
         return Err(TlsParserError::MalformedMessage(
@@ -538,7 +574,11 @@ pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
     Ok(TlsAlert::new(level, description))
 }
 
-// -- functions --
+// =========================
+// TLS Parsing Functions
+// =========================
+// --- TLS Record Parsing ---
+#[allow(dead_code)]
 pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>, TlsError> {
     let current_pos = reader.position() as usize;
     let remaining_len = reader.get_ref().len() - current_pos;
@@ -617,144 +657,121 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
     Ok(messages)
 }
 
+// --- TLS 1.2 ServerHello Parsing ---
+#[allow(dead_code)]
 pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, TlsParserError> {
-    println!(
-        "[DEBUG] Entering parse_server_hello_content, payload: {}",
-        hex::encode(payload)
-    );
+    // ...existing code...
     let mut cursor = Cursor::new(payload);
 
     // 1. Version
     if payload.len() < 2 {
-        println!(
-            "[DEBUG] MalformedServerHello: payload too short for version ({} bytes)",
-            payload.len()
-        );
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let negotiated_tls_version = (cursor.get_ref()[0], cursor.get_ref()[1]);
-    println!(
-        "[DEBUG] Parsed version: {:02x}{:02x}",
-        negotiated_tls_version.0, negotiated_tls_version.1
-    );
+    // ...existing code...
     cursor.set_position(2);
 
     // 2. Server random
     if payload.len() < 34 {
-        println!(
-            "[DEBUG] MalformedServerHello: payload too short for server random ({} bytes)",
-            payload.len()
-        );
         return Err(TlsParserError::MalformedServerHello);
     }
     let mut server_random = [0u8; 32];
     server_random.copy_from_slice(&cursor.get_ref()[2..34]);
-    println!(
-        "[DEBUG] Parsed server_random: {}",
-        hex::encode(&server_random)
-    );
+    // ...existing code...
     cursor.set_position(34);
 
     // 3. Session ID
     if cursor.position() as usize >= payload.len() {
-        println!("[DEBUG] MalformedServerHello: no session id length byte");
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let session_id_len = cursor.get_ref()[cursor.position() as usize] as usize;
-    println!("[DEBUG] Parsed session_id_len: {}", session_id_len);
+    // ...existing code...
     cursor.set_position(cursor.position() + 1);
 
     if cursor.position() as usize + session_id_len > payload.len() {
-        println!("[DEBUG] MalformedServerHello: session id out of bounds");
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
-    let session_id =
+    let _session_id =
         &cursor.get_ref()[cursor.position() as usize..cursor.position() as usize + session_id_len];
-    println!("[DEBUG] Parsed session_id: {}", hex::encode(session_id));
+    // ...existing code...
     cursor.set_position(cursor.position() + session_id_len as u64);
 
     // 4. Cipher suite
     if cursor.position() as usize + 2 > payload.len() {
-        println!("[DEBUG] MalformedServerHello: cipher suite out of bounds");
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let chosen_cipher_suite = [
         cursor.get_ref()[cursor.position() as usize],
         cursor.get_ref()[cursor.position() as usize + 1],
     ];
-    println!(
-        "[DEBUG] Parsed cipher_suite: {:02x}{:02x}",
-        chosen_cipher_suite[0], chosen_cipher_suite[1]
-    );
+    // ...existing code...
     cursor.set_position(cursor.position() + 2);
 
     // 5. Compression method
     if cursor.position() as usize >= payload.len() {
-        println!("[DEBUG] MalformedServerHello: no compression method");
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
-    let compression_method = cursor.get_ref()[cursor.position() as usize];
-    println!(
-        "[DEBUG] Parsed compression_method: {:02x}",
-        compression_method
-    );
+    let _compression_method = cursor.get_ref()[cursor.position() as usize];
+    // ...existing code...
     cursor.set_position(cursor.position() + 1);
 
     // 6. Extensions
     if cursor.position() as usize + 2 > payload.len() {
-        println!("[DEBUG] MalformedServerHello: no extensions length");
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let extensions_len = (cursor.get_ref()[cursor.position() as usize] as usize) << 8
         | (cursor.get_ref()[cursor.position() as usize + 1] as usize);
-    println!("[DEBUG] Parsed extensions_len: {}", extensions_len);
+    // ...existing code...
     cursor.set_position(cursor.position() + 2);
 
     if cursor.position() as usize + extensions_len > payload.len() {
-        println!("[DEBUG] MalformedServerHello: extensions out of bounds");
+        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let extensions =
         &cursor.get_ref()[cursor.position() as usize..cursor.position() as usize + extensions_len];
-    println!("[DEBUG] Parsed extensions: {}", hex::encode(extensions));
+    // ...existing code...
     // Parse extensions
     let mut ext_cursor = Cursor::new(extensions);
     let mut server_key_share_public = None;
     while (ext_cursor.position() as usize) + 4 <= extensions_len {
         let ext_type = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]);
         let ext_len = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]) as usize;
-        println!("[DEBUG] Extension type: {:04x}, len: {}", ext_type, ext_len);
+        // ...existing code...
         std::io::stdout().flush().unwrap();
         if (ext_cursor.position() as usize) + ext_len > extensions_len {
-            println!("[DEBUG] MalformedServerHello: extension length out of bounds");
+            // ...existing code...
             std::io::stdout().flush().unwrap();
             break;
         }
         let mut ext_data = vec![0u8; ext_len];
         ext_cursor.read_exact(&mut ext_data)?;
-        println!("[DEBUG] Extension data: {}", hex::encode(&ext_data));
+        // ...existing code...
         std::io::stdout().flush().unwrap();
         // Key Share extension (0x0033)
         if ext_type == 0x0033 {
             if ext_len >= 4 {
-                let group = u16::from_be_bytes([ext_data[0], ext_data[1]]);
+                let _group = u16::from_be_bytes([ext_data[0], ext_data[1]]);
                 let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
-                println!(
-                    "[DEBUG] KeyShare group: {:04x}, key_len: {}",
-                    group, key_len
-                );
+                // ...existing code...
                 std::io::stdout().flush().unwrap();
                 if ext_len >= 4 + key_len {
                     let key = &ext_data[4..4 + key_len];
-                    println!("[DEBUG] KeyShare public: {}", hex::encode(key));
+                    // ...existing code...
                     std::io::stdout().flush().unwrap();
                     server_key_share_public = Some(key.to_vec());
                 } else {
-                    println!("[DEBUG] KeyShare extension too short for key");
+                    // Debug output removed
                     std::io::stdout().flush().unwrap();
                 }
             } else {
-                println!("[DEBUG] KeyShare extension too short");
+                // Debug output removed
                 std::io::stdout().flush().unwrap();
             }
         }
@@ -813,18 +830,11 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
     Ok(certificates)
 }
 
+#[allow(dead_code)]
 pub fn parse_server_key_exchange_content(
     payload: &[u8],
 ) -> Result<ServerKeyExchangeParsed, TlsParserError> {
-    // Log the complete raw ServerKeyExchange message
-    println!(
-        "    Complete raw ServerKeyExchange message (hex): {}",
-        hex::encode(payload)
-    );
-    println!(
-        "    ServerKeyExchange message length: {} bytes",
-        payload.len()
-    );
+    // ...existing code...
 
     //cursor is used to read the payload byte-by-byte
     let mut cursor = Cursor::new(payload);
@@ -853,13 +863,6 @@ pub fn parse_server_key_exchange_content(
         ));
     }
 
-    // Log signature algorithm
-    println!(
-        "    Signature algorithm: 0x{:02X}{:02X}",
-        signature_algorithm[0], signature_algorithm[1]
-    );
-    println!("    Signature length: {} bytes", signature_bytes.len());
-
     Ok(ServerKeyExchangeParsed {
         curve_type,
         named_curve,
@@ -870,92 +873,55 @@ pub fn parse_server_key_exchange_content(
     })
 }
 
+// --- TLS 1.3 ServerHello Parsing ---
 /// Parses the payload of a TLS 1.3 ServerHello message.
 pub fn parse_tls13_server_hello_payload(
     payload: &[u8],
 ) -> Result<ServerHello13Parsed, TlsParserError> {
-    println!(
-        "[DEBUG] Entering parse_tls13_server_hello_payload, payload: {}",
-        hex::encode(payload)
-    );
     let mut cursor = Cursor::new(payload);
     let mut parsed_sh = ServerHello13Parsed::default();
 
-    // 1. Legacy Version (2 bytes)
-    // In TLS 1.3, this should always be 0x0303 (TLS 1.2) for compatibility,
-    // but the actual negotiated version is in the supported_versions extension.
+    // Legacy Version (2 bytes)
     if payload.len() < 2 {
-        println!("[DEBUG] MalformedServerHello: payload too short for legacy version.");
         return Err(TlsParserError::MalformedServerHello);
     }
     parsed_sh.legacy_version = (cursor.read_u8()?, cursor.read_u8()?);
-    println!(
-        "[DEBUG] Parsed legacy_version: {:02x}{:02x}",
-        parsed_sh.legacy_version.0, parsed_sh.legacy_version.1
-    );
 
-    // 2. Server Random (32 bytes)
+    // Server Random (32 bytes)
     if cursor.position() as usize + 32 > payload.len() {
-        println!("[DEBUG] MalformedServerHello: payload too short for server random.");
         return Err(TlsParserError::MalformedServerHello);
     }
     cursor.read_exact(&mut parsed_sh.server_random)?;
-    println!(
-        "[DEBUG] Parsed server_random: {}",
-        hex::encode(&parsed_sh.server_random)
-    );
 
-    // 3. Session ID Length (1 byte) and Session ID
-    // In TLS 1.3, the session ID should be empty (length 0).
+    // Session ID Length (1 byte) and Session ID
     if cursor.position() as usize >= payload.len() {
-        println!("[DEBUG] MalformedServerHello: no session id length byte.");
         return Err(TlsParserError::MalformedServerHello);
     }
     let session_id_len = cursor.read_u8()? as usize;
-    println!("[DEBUG] Parsed session_id_len: {}", session_id_len);
 
     if cursor.position() as usize + session_id_len > payload.len() {
-        println!("[DEBUG] MalformedServerHello: session id out of bounds.");
         return Err(TlsParserError::MalformedServerHello);
     }
     parsed_sh.session_id.resize(session_id_len, 0);
     cursor.read_exact(&mut parsed_sh.session_id)?;
-    println!(
-        "[DEBUG] Parsed session_id: {}",
-        hex::encode(&parsed_sh.session_id)
-    );
 
-    // 4. Chosen Cipher Suite (2 bytes)
+    // Chosen Cipher Suite (2 bytes)
     if cursor.position() as usize + 2 > payload.len() {
-        println!("[DEBUG] MalformedServerHello: cipher suite out of bounds.");
         return Err(TlsParserError::MalformedServerHello);
     }
     cursor.read_exact(&mut parsed_sh.chosen_cipher_suite)?;
-    println!(
-        "[DEBUG] Parsed chosen_cipher_suite: {:02x}{:02x}",
-        parsed_sh.chosen_cipher_suite[0], parsed_sh.chosen_cipher_suite[1]
-    );
 
-    // 5. Legacy Compression Method (1 byte)
-    // In TLS 1.3, this should always be 0x00 (null compression).
+    // Legacy Compression Method (1 byte)
     if cursor.position() as usize >= payload.len() {
-        println!("[DEBUG] MalformedServerHello: no legacy compression method.");
         return Err(TlsParserError::MalformedServerHello);
     }
     parsed_sh.legacy_compression_method = cursor.read_u8()?;
-    println!(
-        "[DEBUG] Parsed legacy_compression_method: {:02x}",
-        parsed_sh.legacy_compression_method
-    );
 
-    // 6. Extensions (Optional, only if remaining bytes > 0)
-    // Extensions are critical in TLS 1.3 ServerHello.
+    // Extensions (Optional)
     if (cursor.position() as usize) + 2 <= payload.len() {
         let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
-        println!("[DEBUG] Parsed extensions_len: {}", extensions_len);
 
         if cursor.position() as usize + extensions_len > payload.len() {
-            println!("[DEBUG] MalformedServerHello: extensions data out of bounds.");
             return Err(TlsParserError::MalformedServerHello);
         }
 
@@ -971,7 +937,6 @@ pub fn parse_tls13_server_hello_payload(
         cursor.set_position(cursor.position() + extensions_len as u64); // Advance main cursor past extensions
     } else if (cursor.position() as usize) < payload.len() {
         // If there are remaining bytes but not enough for an extensions_len field, it's malformed.
-        println!("[DEBUG] MalformedServerHello: trailing data that is not an extension block.");
         return Err(TlsParserError::MalformedServerHello);
     }
 
@@ -979,23 +944,12 @@ pub fn parse_tls13_server_hello_payload(
     for ext in &parsed_sh.extensions {
         match ext.extension_type {
             EXTENSION_TYPE_SUPPORTED_VERSIONS => {
-                // For ServerHello, this extension payload should be 2 bytes: the negotiated version
                 if ext.payload.len() == 2 {
                     parsed_sh.negotiated_tls_version =
                         Some(TlsVersion::from_u8_pair(ext.payload[0], ext.payload[1]));
-                    println!(
-                        "[DEBUG] Parsed Supported Versions extension: Negotiated TLS 1.3 version: {:?}.{:?}",
-                        ext.payload[0], ext.payload[1]
-                    );
-                } else {
-                    println!(
-                        "[DEBUG] Warning: Malformed Supported Versions extension payload length: {}",
-                        ext.payload.len()
-                    );
                 }
             }
             EXTENSION_TYPE_KEY_SHARE => {
-                // For ServerHello, KeyShare payload: 2 bytes for named group, then variable bytes for public key
                 if ext.payload.len() >= 4 {
                     let mut key_share_cursor = Cursor::new(&ext.payload);
                     let named_group_id = key_share_cursor.read_u16::<BigEndian>()?;
@@ -1006,40 +960,26 @@ pub fn parse_tls13_server_hello_payload(
                         let mut public_key_bytes = vec![0u8; key_len];
                         key_share_cursor.read_exact(&mut public_key_bytes)?;
                         parsed_sh.server_key_share_public = Some(public_key_bytes);
-                        println!(
-                            "[DEBUG] Parsed KeyShare extension: Group ID: 0x{:04x}, Public Key Length: {}",
-                            named_group_id, key_len
-                        );
-                    } else {
-                        println!("[DEBUG] Warning: KeyShare extension too short for public key.");
                     }
-                } else {
-                    println!(
-                        "[DEBUG] Warning: Malformed KeyShare extension payload length: {}",
-                        ext.payload.len()
-                    );
                 }
             }
-            // Add parsing for other relevant TLS 1.3 ServerHello extensions here if needed,
-            // e.g., pre_shared_key (if PSK is supported), cookie, etc.
+            // ...other TLS 1.3 ServerHello extensions...
             _ => {
-                println!(
-                    "[DEBUG] Unhandled extension type in ServerHello: 0x{:04x}",
-                    ext.extension_type
-                );
+                // ...existing code...
             }
         }
     }
 
     // Final check for unread data
     if cursor.position() as usize != payload.len() {
-        println!("[DEBUG] MalformedServerHello: trailing data after parsing complete.");
         return Err(TlsParserError::MalformedServerHello);
     }
 
     Ok(parsed_sh)
 }
 
+// --- TLS 1.3 EncryptedExtensions Parsing ---
+#[allow(dead_code)]
 pub fn parse_tls13_encrypted_extensions_payload(
     payload: &[u8],
 ) -> Result<Vec<Extension>, TlsParserError> {
