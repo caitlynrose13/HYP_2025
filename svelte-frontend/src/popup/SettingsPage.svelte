@@ -3,18 +3,43 @@
   import "./settings.css";
   import { theme } from "../stores/themeStore";
 
-  let isDarkMode = true;
-  $: theme.set(isDarkMode ? "dark" : "light");
-  $: isDarkMode = $theme === "dark";
-
+  let isDarkMode = false;
   export let onGoBack: () => void;
-
   let autoScanOnPageLoad: boolean = false;
   let scanOnlyHttps: boolean = true;
 
+  // Load settings from localStorage on mount
+  function loadSettings() {
+    isDarkMode = localStorage.getItem("darkMode") === "true";
+    autoScanOnPageLoad = localStorage.getItem("autoScan") === "true";
+    scanOnlyHttps = localStorage.getItem("scanOnlyHttps") !== "false";
+    // Only set the global theme variable, do not touch local styles
+    theme.set(isDarkMode ? "dark" : "light");
+  }
+
+  // Save settings to localStorage (only when toggled)
+  function saveDarkMode() {
+    localStorage.setItem("darkMode", isDarkMode.toString());
+    // Only set the global theme variable, do not touch local styles
+    theme.set(isDarkMode ? "dark" : "light");
+  }
+  function saveAutoScan() {
+    localStorage.setItem("autoScan", autoScanOnPageLoad.toString());
+  }
+  function saveScanOnlyHttps() {
+    localStorage.setItem("scanOnlyHttps", scanOnlyHttps.toString());
+  }
+
+  // Initialize settings on mount
+  import { onMount } from "svelte";
+  onMount(() => {
+    loadSettings();
+  });
+
   function clearData() {
-    console.log("Clear Stored Data button clicked!");
-    alert("Data would be cleared here!");
+    localStorage.clear();
+    loadSettings();
+    alert("All stored data cleared!");
   }
 
   function handleGoBack() {
@@ -57,7 +82,12 @@
     <div class="setting-item">
       <label for="label-text">Toggle Dark Mode</label>
       <label class="switch">
-        <input type="checkbox" id="theme-toggle" bind:checked={isDarkMode} />
+        <input
+          type="checkbox"
+          id="theme-toggle"
+          bind:checked={isDarkMode}
+          on:change={saveDarkMode}
+        />
         <span class="slider round"></span>
       </label>
     </div>
@@ -69,6 +99,7 @@
           type="checkbox"
           id="auto-scan"
           bind:checked={autoScanOnPageLoad}
+          on:change={saveAutoScan}
         />
         <span class="slider round"></span>
       </label>
@@ -77,7 +108,12 @@
     <div class="setting-item">
       <label for="scan-https">Scan only HTTPS</label>
       <label class="switch">
-        <input type="checkbox" id="scan-https" bind:checked={scanOnlyHttps} />
+        <input
+          type="checkbox"
+          id="scan-https"
+          bind:checked={scanOnlyHttps}
+          on:change={saveScanOnlyHttps}
+        />
         <span class="slider round"></span>
       </label>
     </div>

@@ -1,3 +1,16 @@
+// Returns the full URL of the active tab (not just the domain)
+export async function getActiveTabUrl(): Promise<string | null> {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const url = tabs[0]?.url;
+      if (!url) {
+        resolve(null);
+      } else {
+        resolve(url);
+      }
+    });
+  });
+}
 //function to get the domain from the active tabs URL
 
 export async function getActiveTabDomain(): Promise<string | null> {

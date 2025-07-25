@@ -2,7 +2,7 @@
 <script lang="ts">
   import { theme } from "../stores/themeStore";
   import { onMount } from "svelte";
-  import { getActiveTabDomain } from "../lib/getDomain";
+  import { getActiveTabUrl } from "../lib/getDomain";
   import { currentView } from "../stores/navigationStore";
   import SettingsPage from "./SettingsPage.svelte";
   import GradeCard from "./components/GradeCard.svelte";
@@ -10,6 +10,18 @@
 
   $: {
     document.body.setAttribute("data-theme", $theme);
+  }
+
+  // Load persistent settings from localStorage on startup
+  let autoScan = false;
+  let scanOnlyHttps = true;
+  let darkMode = false;
+
+  function loadSettings() {
+    autoScan = localStorage.getItem("autoScan") === "true";
+    scanOnlyHttps = localStorage.getItem("scanOnlyHttps") !== "false";
+    darkMode = localStorage.getItem("darkMode") === "true";
+    theme.set(darkMode ? "dark" : "light");
   }
 
   let domain: string = "";
@@ -88,29 +100,63 @@
   async function assess(domainToAssess: string) {
     if (!domainToAssess || loading) return;
 
+    // Always use the full URL for logic
+    let urlToAssess = domainToAssess;
+    if (
+      !urlToAssess.startsWith("http://") &&
+      !urlToAssess.startsWith("https://")
+    ) {
+      urlToAssess = `https://${urlToAssess}`;
+    }
+
+    // Only block HTTP URLs if scanOnlyHttps is enabled
+    if (scanOnlyHttps && urlToAssess.startsWith("http://")) {
+      error =
+        "This domain uses HTTP. Only secure (HTTPS) domains can be scanned.";
+      tlsReportData = {
+        domain: urlToAssess,
+        message: "HTTP domain. Scan not performed as per settings.",
+        grade: "F",
+        certificate: {},
+        protocols: {},
+        cipher_suites: {},
+        vulnerabilities: {},
+        key_exchange: {},
+      };
+      result = "Analysis not performed.";
+      analysisInitiated = true;
+      loading = false;
+      return;
+    }
+
+    // Extract hostname for backend
+    let backendDomain = urlToAssess;
+    try {
+      backendDomain = new URL(urlToAssess).hostname;
+    } catch (e) {
+      // fallback: send as-is
+    }
+
     loading = true;
     result = "";
     error = "";
     tlsReportData = null;
 
     try {
-      console.log("About to start fetch...");
-      console.log("Domain being sent:", domainToAssess);
+      // ...existing code...
       const controller = new AbortController();
       setTimeout(() => {
         console.log("Request timeout reached after 60 seconds, aborting...");
         controller.abort();
-      }, 60000); // 60 seconds - much longer for complex TLS handshakes
+      }, 60000);
 
       const res = await fetch("http://127.0.0.1:8080/assess", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain: domainToAssess }),
+        body: JSON.stringify({ domain: backendDomain }),
         signal: controller.signal,
       });
-      console.log("Fetch returned, status:", res.status);
-      console.log("Response headers:", res.headers);
-
+      // ...existing code...
       if (!res.ok) {
         const errorText = await res.text();
         console.error("HTTP error response:", errorText);
@@ -118,17 +164,12 @@
       }
 
       const json = await res.json();
-      console.log("[assess] JSON response:", json);
-      console.log("[assess] JSON response type:", typeof json);
-      console.log("[assess] JSON response keys:", Object.keys(json));
-
-      tlsReportData = json; // Store the full response
+      // ...existing code...
+      tlsReportData = json;
       result = "Analysis complete.";
       console.log("tlsReportData set:", tlsReportData);
     } catch (err: any) {
-      console.error("[assess] Fetch error:", err);
-      console.error("[assess] Error type:", err.name);
-      console.error("[assess] Error message:", err.message);
+      // ...existing code...
       if (err.name === "AbortError") {
         error = `Request timed out after 30 seconds. The TLS assessment may take longer for some domains.`;
       } else {
@@ -139,15 +180,21 @@
     }
   }
 
-  // Automatically get the active tab's domain on mount
+  // Automatically get the active tab's domain on mount and apply settings
   onMount(async () => {
-    const activeDomain = await getActiveTabDomain();
-    if (activeDomain) {
-      console.log("[ Auto-filled domain:", activeDomain);
-      domain = activeDomain;
+    loadSettings();
+    const activeUrl = await getActiveTabUrl();
+    if (activeUrl) {
+      console.log("[ Auto-filled URL:", activeUrl);
+      domain = activeUrl;
+      // Auto scan logic from persistent settings
+      if (autoScan) {
+        analysisInitiated = true;
+        assess(domain);
+      }
     } else {
-      error = "Failed to get active tab domain.";
-      console.warn("Couldn't retrieve active tab domain.");
+      error = "Failed to get active tab URL.";
+      console.warn("Couldn't retrieve active tab URL.");
     }
   });
 
