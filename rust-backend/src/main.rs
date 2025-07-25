@@ -1,32 +1,40 @@
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    response::Json as AxumJson,
+    routing::{get, post},
+};
 use rust_backend::handlers::assessment_handler::assess_domain;
+use serde_json::json;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
 mod services;
+
+async fn health_check() -> AxumJson<serde_json::Value> {
+    AxumJson(json!({
+        "status": "healthy",
+        "message": "TLS Assessment Backend is running"
+    }))
+}
 
 #[tokio::main]
 async fn main() {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    // Test TLS 1.2 and TLS 1.3 handshake for a given domain
-    let test_domain = "google.com"; // Test with Google's TLS 1.3 implementation
-    match crate::services::tls_handshake::client_handshake::test_tls12(test_domain) {
-        Ok(_) => println!("TLS 1.2 handshake succeeded for {}", test_domain),
-        Err(e) => println!("TLS 1.2 handshake failed for {}: {}", test_domain, e),
-    }
-    match crate::services::tls_handshake::tls13::client::test_tls13(test_domain) {
-        Ok(_) => println!("TLS 1.3 handshake succeeded for {}", test_domain),
-        Err(e) => println!("TLS 1.3 handshake failed for {}: {}", test_domain, e),
-    }
+    println!("TLS Assessment Backend Server");
+    println!("Ready to assess domains via /assess endpoint");
 
     // Set up CORS for local dev
-    let cors = CorsLayer::new().allow_origin(Any);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     // Build the Axum app
     let app = Router::new()
         .route("/assess", post(assess_domain)) //when a post is made, assess_domain is called
+        .route("/health", get(health_check)) // health check endpoint
         .layer(cors);
 
     // Start the server

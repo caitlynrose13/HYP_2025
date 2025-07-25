@@ -50,17 +50,36 @@
     <h2>1. Certificate</h2>
     <table>
       <tbody>
-        <tr><td>Common Name:</td><td>{cert.cert_common_name}</td></tr>
-        <tr><td>Issuer:</td><td>{cert.cert_issuer}</td></tr>
+        <tr
+          ><td>Common Name:</td><td>{cert.certificate?.common_name || "N/A"}</td
+          ></tr
+        >
+        <tr><td>Issuer:</td><td>{cert.certificate?.issuer || "N/A"}</td></tr>
         <tr>
           <td>Valid From and To:</td>
           <td
-            >{formatDate(cert.cert_valid_from)} - {formatDate(
-              cert.cert_valid_to,
+            >{formatDate(cert.certificate?.valid_from)} - {formatDate(
+              cert.certificate?.valid_to
             )}</td
           >
         </tr>
-        <tr><td>Chain Trust:</td><td>{cert.cert_chain_trust}</td></tr>
+        <tr
+          ><td>Chain Trust:</td><td
+            >{cert.certificate?.chain_trust || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>Days Until Expiry:</td><td
+            >{cert.certificate?.days_until_expiry || "Unknown"}</td
+          ></tr
+        >
+        {#if cert.certificate?.subject_alt_names && cert.certificate.subject_alt_names.length > 0}
+          <tr
+            ><td>Subject Alt Names:</td><td
+              >{cert.certificate.subject_alt_names.join(", ")}</td
+            ></tr
+          >
+        {/if}
       </tbody>
     </table>
   </section>
@@ -70,8 +89,31 @@
     <table>
       <tbody>
         <tr
+          ><td>TLS 1.0:</td><td
+            class="protocol-status {cert.protocols?.tls_1_0 === 'Supported'
+              ? 'supported'
+              : 'not-supported'}">{cert.protocols?.tls_1_0 || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>TLS 1.1:</td><td
+            class="protocol-status {cert.protocols?.tls_1_1 === 'Supported'
+              ? 'supported'
+              : 'not-supported'}">{cert.protocols?.tls_1_1 || "Unknown"}</td
+          ></tr
+        >
+        <tr
           ><td>TLS 1.2:</td><td
-            >{cert.tls_version === "TLS1_2" ? "Yes" : "No"}</td
+            class="protocol-status {cert.protocols?.tls_1_2 === 'Supported'
+              ? 'supported'
+              : 'not-supported'}">{cert.protocols?.tls_1_2 || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>TLS 1.3:</td><td
+            class="protocol-status {cert.protocols?.tls_1_3 === 'Supported'
+              ? 'supported'
+              : 'not-supported'}">{cert.protocols?.tls_1_3 || "Unknown"}</td
           ></tr
         >
       </tbody>
@@ -82,8 +124,85 @@
     <h2>3. Cipher Suites</h2>
     <table>
       <tbody>
-        <tr><td>TLS 1.2:</td><td>{cert.cipher_suite}</td></tr>
-        <!-- will need more later for 1.3 -->
+        {#if cert.cipher_suites?.preferred_suite}
+          <tr
+            ><td>Preferred:</td><td>{cert.cipher_suites.preferred_suite}</td
+            ></tr
+          >
+        {/if}
+        {#if cert.cipher_suites?.tls_1_2_suites && cert.cipher_suites.tls_1_2_suites.length > 0}
+          <tr
+            ><td>TLS 1.2:</td><td
+              >{cert.cipher_suites.tls_1_2_suites.join(", ")}</td
+            ></tr
+          >
+        {/if}
+        {#if cert.cipher_suites?.tls_1_3_suites && cert.cipher_suites.tls_1_3_suites.length > 0}
+          <tr
+            ><td>TLS 1.3:</td><td
+              >{cert.cipher_suites.tls_1_3_suites.join(", ")}</td
+            ></tr
+          >
+        {/if}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="report-block">
+    <h2>4. Key Exchange</h2>
+    <table>
+      <tbody>
+        <tr
+          ><td>Forward Secrecy:</td><td
+            class="fs-status {cert.key_exchange?.supports_forward_secrecy
+              ? 'supported'
+              : 'not-supported'}"
+            >{cert.key_exchange?.supports_forward_secrecy ? "Yes" : "No"}</td
+          ></tr
+        >
+        {#if cert.key_exchange?.key_exchange_algorithm}
+          <tr
+            ><td>Algorithm:</td><td
+              >{cert.key_exchange.key_exchange_algorithm}</td
+            ></tr
+          >
+        {/if}
+        {#if cert.key_exchange?.curve_name}
+          <tr><td>Curve:</td><td>{cert.key_exchange.curve_name}</td></tr>
+        {/if}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="report-block">
+    <h2>5. Vulnerabilities</h2>
+    <table>
+      <tbody>
+        <tr
+          ><td>POODLE:</td><td class="vuln-status"
+            >{cert.vulnerabilities?.poodle || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>BEAST:</td><td class="vuln-status"
+            >{cert.vulnerabilities?.beast || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>Heartbleed:</td><td class="vuln-status"
+            >{cert.vulnerabilities?.heartbleed || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>FREAK:</td><td class="vuln-status"
+            >{cert.vulnerabilities?.freak || "Unknown"}</td
+          ></tr
+        >
+        <tr
+          ><td>Logjam:</td><td class="vuln-status"
+            >{cert.vulnerabilities?.logjam || "Unknown"}</td
+          ></tr
+        >
       </tbody>
     </table>
   </section>
@@ -188,5 +307,27 @@
     word-wrap: break-word;
     overflow-wrap: break-word;
     white-space: normal;
+  }
+
+  .protocol-status.supported {
+    color: #4caf50;
+    font-weight: bold;
+  }
+
+  .protocol-status.not-supported {
+    color: #f44336;
+  }
+
+  .fs-status.supported {
+    color: #4caf50;
+    font-weight: bold;
+  }
+
+  .fs-status.not-supported {
+    color: #ff9800;
+  }
+
+  .vuln-status {
+    font-size: 0.9em;
   }
 </style>

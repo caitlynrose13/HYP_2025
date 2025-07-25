@@ -8,13 +8,17 @@ export async function getActiveTabDomain(): Promise<string | null> {
 
       console.log("queried tabs", tabs);
       const url = tabs[0]?.url; //get the first (basically only) tab URL
-      if (!url) return resolve(null);
-      console.log("no URL found");
+      if (!url) {
+        console.log("no URL found");
+        return resolve(null);
+      }
+      console.log("URL found:", url);
       try {
         const { hostname } = new URL(url);
         console.log("Parsed hostname:", hostname);
         resolve(hostname);
-      } catch {
+      } catch (error) {
+        console.error("Error parsing URL:", error);
         resolve(null);
       }
     });

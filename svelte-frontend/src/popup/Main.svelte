@@ -22,27 +22,66 @@
 
   // Calculate days until certificate expiry
   $: certExpiryDays = (() => {
-    if (tlsReportData && tlsReportData.cert_valid_to) {
-      const expiry = new Date(tlsReportData.cert_valid_to);
+    if (
+      tlsReportData &&
+      tlsReportData.certificate &&
+      tlsReportData.certificate.valid_to
+    ) {
+      const expiry = new Date(tlsReportData.certificate.valid_to);
       const now = new Date();
       const diffMs = expiry.getTime() - now.getTime();
       const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
       return diffDays;
+    }
+    if (
+      tlsReportData &&
+      tlsReportData.certificate &&
+      tlsReportData.certificate.days_until_expiry
+    ) {
+      return tlsReportData.certificate.days_until_expiry;
     }
     return null;
   })();
 
   interface TlsReportData {
     domain: string;
+    message: string;
+    grade: string;
     certificate: {
+      common_name: string;
       issuer: string;
-      validFrom: string;
-      validTo: string;
-      keySize: string;
-      commonName: string;
+      valid_from: string;
+      valid_to: string;
+      key_size?: string;
+      signature_algorithm?: string;
+      chain_trust: string;
+      days_until_expiry?: number;
+      subject_alt_names: string[];
+      serial_number?: string;
     };
-    protocols: Record<string, string>;
-    vulnerabilities: Record<string, string>;
+    protocols: {
+      tls_1_0: string;
+      tls_1_1: string;
+      tls_1_2: string;
+      tls_1_3: string;
+    };
+    cipher_suites: {
+      tls_1_2_suites: string[];
+      tls_1_3_suites: string[];
+      preferred_suite?: string;
+    };
+    vulnerabilities: {
+      poodle: string;
+      beast: string;
+      heartbleed: string;
+      freak: string;
+      logjam: string;
+    };
+    key_exchange: {
+      supports_forward_secrecy: boolean;
+      key_exchange_algorithm?: string;
+      curve_name?: string;
+    };
   }
 
   //Function to assess domain, takes in a domain string to parse to backend.
@@ -56,8 +95,13 @@
 
     try {
       console.log("About to start fetch...");
+      console.log("Domain being sent:", domainToAssess);
       const controller = new AbortController();
-      setTimeout(() => controller.abort(), 5000); // 5 seconds
+      setTimeout(() => {
+        console.log("Request timeout reached after 60 seconds, aborting...");
+        controller.abort();
+      }, 60000); // 60 seconds - much longer for complex TLS handshakes
+
       const res = await fetch("http://127.0.0.1:8080/assess", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -65,18 +109,31 @@
         signal: controller.signal,
       });
       console.log("Fetch returned, status:", res.status);
+      console.log("Response headers:", res.headers);
+
       if (!res.ok) {
         const errorText = await res.text();
+        console.error("HTTP error response:", errorText);
         throw new Error(`HTTP error! Status: ${res.status} - ${errorText}`);
       }
 
       const json = await res.json();
       console.log("[assess] JSON response:", json);
+      console.log("[assess] JSON response type:", typeof json);
+      console.log("[assess] JSON response keys:", Object.keys(json));
+
       tlsReportData = json; // Store the full response
       result = "Analysis complete.";
+      console.log("tlsReportData set:", tlsReportData);
     } catch (err: any) {
       console.error("[assess] Fetch error:", err);
-      error = `Failed to connect to backend or invalid response: ${err.message || err}`;
+      console.error("[assess] Error type:", err.name);
+      console.error("[assess] Error message:", err.message);
+      if (err.name === "AbortError") {
+        error = `Request timed out after 30 seconds. The TLS assessment may take longer for some domains.`;
+      } else {
+        error = `Failed to connect to backend or invalid response: ${err.message || err}`;
+      }
     } finally {
       loading = false;
     }
@@ -215,9 +272,13 @@
           <GradeCard
             grade={tlsReportData.grade ?? "?"}
             summary={tlsReportData.message}
-            tlsProtocol={tlsReportData.tls_version}
-            certValid={tlsReportData.cert_chain_trust === "Trusted"}
-            certIssuer={tlsReportData.cert_issuer}
+            tlsProtocol={tlsReportData.protocols?.tls_1_3 === "Supported"
+              ? "TLS 1.3"
+              : tlsReportData.protocols?.tls_1_2 === "Supported"
+                ? "TLS 1.2"
+                : "Unknown"}
+            certValid={tlsReportData.certificate?.chain_trust === "Trusted"}
+            certIssuer={tlsReportData.certificate?.issuer ?? "Unknown"}
             certExpiryDays={certExpiryDays ?? 0}
             onViewDetailedReport={goToReport}
           />
