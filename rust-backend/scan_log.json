@@ -1,60 +1,4 @@
 {
-  "www.youtube.com": {
-    "domain": "www.youtube.com",
-    "grade": "A",
-    "details": {
-      "tls13_supported": true,
-      "tls12_supported": true,
-      "tls11_supported": false,
-      "tls10_supported": false,
-      "cipher_is_strong": true,
-      "cert_valid": true,
-      "hsts": false,
-      "forward_secrecy": true,
-      "weak_protocols_disabled": true
-    },
-    "certificate": {
-      "common_name": "*.google.com",
-      "issuer": "WR2",
-      "valid_from": "Mon, 07 Jul 2025 08:34:03 +0000",
-      "valid_to": "Mon, 29 Sep 2025 08:34:02 +0000",
-      "key_size": null,
-      "signature_algorithm": null,
-      "chain_trust": "Trusted",
-      "days_until_expiry": 30,
-      "subject_alt_names": [],
-      "serial_number": null
-    },
-    "protocols": {
-      "tls_1_0": "Not Tested",
-      "tls_1_1": "Not Tested",
-      "tls_1_2": "Supported",
-      "tls_1_3": "Supported"
-    },
-    "cipher_suites": {
-      "tls_1_2_suites": [
-        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-      ],
-      "tls_1_3_suites": [
-        "TLS_AES_128_GCM_SHA256",
-        "TLS_AES_256_GCM_SHA384",
-        "TLS_CHACHA20_POLY1305_SHA256"
-      ],
-      "preferred_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-    },
-    "vulnerabilities": {
-      "poodle": "Not Vulnerable (TLS 1.2+)",
-      "beast": "Not Vulnerable (TLS 1.2+)",
-      "heartbleed": "Unknown",
-      "freak": "Not Vulnerable (Modern TLS)",
-      "logjam": "Not Vulnerable (ECDHE)"
-    },
-    "key_exchange": {
-      "supports_forward_secrecy": true,
-      "key_exchange_algorithm": "ECDHE",
-      "curve_name": "P-256"
-    }
-  },
   "www.google.com": {
     "domain": "www.google.com",
     "grade": "A",
@@ -109,6 +53,66 @@
       "supports_forward_secrecy": true,
       "key_exchange_algorithm": "ECDHE",
       "curve_name": "P-256"
-    }
+    },
+    "whois": null,
+    "explanation": null
+  },
+  "www.youtube.com": {
+    "domain": "www.youtube.com",
+    "grade": "APlus",
+    "details": {
+      "tls13_supported": true,
+      "tls12_supported": true,
+      "tls11_supported": false,
+      "tls10_supported": false,
+      "cipher_is_strong": true,
+      "cert_valid": true,
+      "hsts": true,
+      "forward_secrecy": true,
+      "weak_protocols_disabled": true
+    },
+    "certificate": {
+      "common_name": "*.google.com",
+      "issuer": "WR2",
+      "valid_from": "Mon, 07 Jul 2025 08:34:03 +0000",
+      "valid_to": "Mon, 29 Sep 2025 08:34:02 +0000",
+      "key_size": null,
+      "signature_algorithm": null,
+      "chain_trust": "Trusted",
+      "days_until_expiry": null,
+      "subject_alt_names": [],
+      "serial_number": null
+    },
+    "protocols": {
+      "tls_1_0": "Not Tested",
+      "tls_1_1": "Not Tested",
+      "tls_1_2": "Supported",
+      "tls_1_3": "Supported"
+    },
+    "cipher_suites": {
+      "tls_1_2_suites": [
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+      ],
+      "tls_1_3_suites": [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256"
+      ],
+      "preferred_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    },
+    "vulnerabilities": {
+      "poodle": "Not Vulnerable (TLS 1.2+)",
+      "beast": "Not Vulnerable (TLS 1.2+)",
+      "heartbleed": "Unknown",
+      "freak": "Not Vulnerable (Modern TLS)",
+      "logjam": "Not Vulnerable (ECDHE)"
+    },
+    "key_exchange": {
+      "supports_forward_secrecy": true,
+      "key_exchange_algorithm": "ECDHE",
+      "curve_name": "P-256"
+    },
+    "whois": null,
+    "explanation": null
   }
 }

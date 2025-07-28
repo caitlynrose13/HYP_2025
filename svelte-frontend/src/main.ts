@@ -1,10 +1,20 @@
 import { mount } from "svelte";
 import "./app.css";
 import App from "./popup/Main.svelte";
+import TabView from "./tab/TabView.svelte";
 
-//render the app
-const app = mount(App, {
-  target: document.getElementById("app")!, //tells the framework where should be rendered.
-});
+const target = document.getElementById("app")!;
 
-export default app;
+function render() {
+  target.innerHTML = "";
+  if (window.location.hash === "#/tab") {
+    mount(TabView, { target });
+  } else {
+    mount(App, { target });
+  }
+}
+
+window.addEventListener("hashchange", render);
+render();
+
+export default null;

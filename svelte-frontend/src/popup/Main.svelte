@@ -208,7 +208,11 @@
 
   function goToReport() {
     if (!tlsReportData) return;
-    currentView.set("detailedReport");
+    localStorage.setItem("tlsReportData", JSON.stringify(tlsReportData));
+    window.open(
+      window.location.origin + window.location.pathname + "#/tab",
+      "_blank"
+    );
   }
 </script>
 

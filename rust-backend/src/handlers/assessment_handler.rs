@@ -127,7 +127,7 @@ pub async fn assess_domain(
 
     // Basic HSTS detection: try to fetch HTTPS headers and check for Strict-Transport-Security
     let mut hsts_supported = false;
-    if let Ok(resp) = reqwest::blocking::get(format!("https://{}", domain)) {
+    if let Ok(resp) = reqwest::get(format!("https://{}", domain)).await {
         if let Some(hsts) = resp.headers().get("strict-transport-security") {
             hsts_supported = true;
         }
