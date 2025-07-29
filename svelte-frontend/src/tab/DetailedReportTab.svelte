@@ -1,13 +1,38 @@
-<!--Page to display the detailed view of tls report-->
 <script lang="ts">
   export let handleGoBack: () => void;
-  export let tlsReportData: any; // Accept the full backend response
+  export let tlsReportData: any;
 
-  // Extract fields for display
   $: cert = tlsReportData || {};
   import { theme } from "../stores/themeStore";
   import { onMount } from "svelte";
   import { get } from "svelte/store";
+
+  // Spinner
+  let mozillaLoading = false;
+  let mozillaError: string | null = null;
+
+  async function fetchMozillaObservatory(domain: string) {
+    mozillaLoading = true;
+    mozillaError = null;
+    try {
+      const resp = await fetch(
+        `http://127.0.0.1:8080/api/observatory?domain=${encodeURIComponent(domain)}&scan_type=observatory`
+      );
+      if (!resp.ok) throw new Error(await resp.text());
+      const mozillaResult = await resp.json();
+      cert.mozilla_observatory_grade = mozillaResult.grade;
+      cert.mozilla_observatory_scan_time = mozillaResult.scan_duration;
+      cert = { ...cert };
+    } catch (e: any) {
+      mozillaError =
+        e.message || "Failed to fetch Mozilla Observatory results.";
+      cert.mozilla_observatory_grade = undefined;
+      cert.mozilla_observatory_scan_time = undefined;
+      cert = { ...cert };
+    } finally {
+      mozillaLoading = false;
+    }
+  }
 
   onMount(() => {
     // Load theme from localStorage and apply globally
@@ -24,6 +49,10 @@
 
     setTheme(savedTheme);
     theme.subscribe(setTheme);
+
+    if (cert.domain) {
+      fetchMozillaObservatory(cert.domain);
+    }
   });
 
   // Helper to format date string to 'DD Mon YYYY'
@@ -36,21 +65,6 @@
       month: "short",
       year: "numeric",
     });
-  }
-
-  // Helper function to determine icon and display text for protocol status
-  function getProtocolStatusDisplay(status: string): {
-    icon: string;
-    text: string;
-  } {
-    if (status.includes("Supported")) {
-      return { icon: "", text: "Supported" };
-    } else if (status.includes("Recommended")) {
-      return { icon: "", text: status };
-    } else if (status.includes("Deprecated") || status.includes("Insecure")) {
-      return { icon: "", text: "Deprecated" };
-    }
-    return { icon: "", text: status };
   }
 </script>
 
@@ -95,7 +109,12 @@
           >
         </div>
         <div class="comparison-time">
-          Scan Time: <span class="status-text">Complete</span>
+          Scan Time:
+          {#if cert.tls_scan_duration}
+            <span>{cert.tls_scan_duration}</span>
+          {:else}
+            <span class="status-text">Not Available</span>
+          {/if}
         </div>
       </div>
       <div class="comparison-card">
@@ -106,10 +125,37 @@
         />
         <div class="comparison-label">Mozilla Observatory</div>
         <div class="comparison-grade">
-          Grade: <span class="grade-badge grade-placeholder">-</span>
+          {#if mozillaLoading}
+            <span class="spinner"></span>
+            <span class="grade-badge grade-placeholder">Loading...</span>
+          {:else if mozillaError}
+            <span class="grade-badge grade-placeholder">Error</span>
+          {:else}
+            Grade: <span
+              class="grade-badge grade-{cert.mozilla_observatory_grade
+                ? cert.mozilla_observatory_grade
+                    .toLowerCase()
+                    .replace(/\+/g, 'plus')
+                : 'placeholder'}"
+            >
+              {cert.mozilla_observatory_grade
+                ? cert.mozilla_observatory_grade
+                : "-"}
+            </span>
+          {/if}
         </div>
         <div class="comparison-time">
-          Scan Time: <span class="status-text">Not Available</span>
+          Scan Time: <span class="status-text">
+            {#if mozillaLoading}
+              Loading...
+            {:else if mozillaError}
+              {mozillaError}
+            {:else}
+              {cert.mozilla_observatory_scan_time
+                ? cert.mozilla_observatory_scan_time
+                : "Not Available"}
+            {/if}
+          </span>
         </div>
       </div>
       <div class="comparison-card">
@@ -789,6 +835,23 @@
     .comparison-logo {
       width: 48px;
       height: 48px;
+    }
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border: 3px solid #ccc;
+    border-top: 3px solid #1976d2;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
     }
   }
 </style>

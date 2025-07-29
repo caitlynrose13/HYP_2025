@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post},
 };
 use rust_backend::handlers::assessment_handler::assess_domain;
+use rust_backend::handlers::external_scan_handler::external_scan;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -33,6 +34,7 @@ async fn main() {
     let app = Router::new()
         .route("/assess", post(assess_domain)) //when a post is made, assess_domain is called
         .route("/health", get(health_check)) // health check endpoint
+        .route("/api/observatory", get(external_scan)) //
         .layer(cors);
 
     // Start the server

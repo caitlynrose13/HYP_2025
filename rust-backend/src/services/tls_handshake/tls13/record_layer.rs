@@ -8,17 +8,10 @@ use aes_gcm::{
 };
 use chacha20poly1305::ChaCha20Poly1305;
 
-/// Compute TLS 1.3 nonce by XORing IV with sequence number
-/// RFC 8446 Section 5.3: The nonce is formed by XORing the static IV with the sequence number
 pub fn compute_nonce(iv: &[u8; 12], sequence_number: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(iv);
-
-    // Convert sequence number to 8-byte big-endian representation
     let seq_bytes = sequence_number.to_be_bytes();
-
-    // XOR with the last 8 bytes of the nonce (IV is 12 bytes, sequence is 8 bytes)
-    // Per RFC 8446: nonce = static_iv XOR (0x00000000 || sequence_number)
     for i in 0..8 {
         nonce[4 + i] ^= seq_bytes[i];
     }
@@ -85,16 +78,9 @@ pub fn decrypt_record(
     record_length: u16,
     cipher_suite: &CipherSuite,
 ) -> Result<Vec<u8>, TlsError> {
-    // Select correct traffic secret
-    // During handshake phase, ALL records (including ApplicationData) use handshake traffic secret
-    // Only after handshake completion should we use application traffic secret
     let traffic_secret = match record_type {
         0x16 => handshake_traffic_secret,
-        0x17 => {
-            // During handshake phase, ApplicationData records are encrypted with handshake traffic secret
-            // This is per RFC 8446 - handshake messages are wrapped in ApplicationData records
-            handshake_traffic_secret
-        }
+        0x17 => handshake_traffic_secret,
         _ => handshake_traffic_secret,
     };
 
@@ -104,8 +90,6 @@ pub fn decrypt_record(
         .map_err(|_| TlsError::DecryptionError("IV must be exactly 12 bytes".to_string()))?;
     let nonce = compute_nonce(&iv_array, sequence_number);
 
-    // TLS 1.3 AAD: opaque_type (1) || legacy_record_version (2) || length (2)
-    // The length field in AAD should match the record header length field
     let mut aad = Vec::with_capacity(5);
     aad.push(record_type); // This is always 0x17 for encrypted TLS 1.3 records
     aad.push(version_major); // 0x03
@@ -175,14 +159,11 @@ pub fn decrypt_record(
     process_tls13_plaintext(plaintext)
 }
 
-/// Helper function to process TLS 1.3 plaintext (remove padding and extract content type)
+/// Helper function to process TLS 1.3 plaintext
 fn process_tls13_plaintext(mut plaintext: Vec<u8>) -> Result<Vec<u8>, TlsError> {
-    // Remove trailing zero bytes which are padding
     while let Some(&0) = plaintext.last() {
         plaintext.pop();
     }
-
-    // The last byte should be the real content type
     if plaintext.pop().is_none() {
         return Err(TlsError::DecryptionError(
             "Invalid TLS 1.3 plaintext: missing content type".to_string(),

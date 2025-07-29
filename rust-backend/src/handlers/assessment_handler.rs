@@ -21,6 +21,7 @@ pub struct AssessmentResponse {
     pub vulnerabilities: VulnerabilityInfo,
     pub key_exchange: KeyExchangeInfo,
     pub explanation: Option<String>,
+    pub tls_scan_duration: Option<String>, // <-- Add this line
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
@@ -73,6 +74,8 @@ pub struct KeyExchangeInfo {
 pub async fn assess_domain(
     Json(payload): Json<AssessmentRequest>,
 ) -> (StatusCode, Json<AssessmentResponse>) {
+    let scan_start = std::time::Instant::now();
+
     println!("=== BACKEND: Received request ===");
     println!("Request payload: {:?}", payload);
 
@@ -128,7 +131,7 @@ pub async fn assess_domain(
     // Basic HSTS detection: try to fetch HTTPS headers and check for Strict-Transport-Security
     let mut hsts_supported = false;
     if let Ok(resp) = reqwest::get(format!("https://{}", domain)).await {
-        if let Some(hsts) = resp.headers().get("strict-transport-security") {
+        if let Some(_hsts) = resp.headers().get("strict-transport-security") {
             hsts_supported = true;
         }
     }
@@ -180,6 +183,7 @@ pub async fn assess_domain(
                 vulnerabilities,
                 key_exchange,
                 explanation,
+                tls_scan_duration: None, // <-- Add this line
             }),
         );
     }
@@ -284,7 +288,9 @@ pub async fn assess_domain(
     println!("Final Grade: {:?}", grade);
     println!("=== Assessment Complete ===\n");
 
-    // Always return a response, even if both protocols failed
+    let scan_duration = scan_start.elapsed().as_secs_f32();
+    let scan_duration_str = format!("{:.2}s", scan_duration);
+
     (
         StatusCode::OK,
         Json(AssessmentResponse {
@@ -301,6 +307,7 @@ pub async fn assess_domain(
             vulnerabilities,
             key_exchange,
             explanation,
+            tls_scan_duration: Some(scan_duration_str), // <-- Add this line
         }),
     )
 }
