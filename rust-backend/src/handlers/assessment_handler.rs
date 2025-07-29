@@ -1,4 +1,5 @@
 use crate::services::certificate_parser::parse_certificate;
+use crate::services::openssl_probe::{test_tls10, test_tls11};
 use crate::services::security_grader::GradeInput;
 use crate::services::tls_parser::TlsVersion;
 use axum::{Json, http::StatusCode};
@@ -271,6 +272,18 @@ pub async fn assess_domain(
             println!("✗ TLS 1.3 handshake failed for {}: {:?}", domain, e);
         }
     }
+
+    // Check TLS 1.0 and 1.1 support
+    protocols.tls_1_0 = if test_tls10(&domain) {
+        "Supported".to_string()
+    } else {
+        "Not Supported".to_string()
+    };
+    protocols.tls_1_1 = if test_tls11(&domain) {
+        "Supported".to_string()
+    } else {
+        "Not Supported".to_string()
+    };
 
     let (grade, cached) = crate::services::security_grader::get_or_run_scan(
         &domain,

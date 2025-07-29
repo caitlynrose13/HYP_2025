@@ -6,11 +6,6 @@ use ring::hkdf::Prk;
 use sha2::Digest;
 use sha2::{Sha256, Sha384};
 
-/// Implements the TLS 1.3 key schedule for handshake traffic secrets.
-/// See RFC 8446, Section 7.1 and 7.2.
-/// use_sha384: true for TLS_AES_256_GCM_SHA384, false for others
-
-/// Refactored: Accepts TranscriptHashAlgorithm, uses correct hash/HKDF for handshake secrets
 pub fn derive_tls13_handshake_traffic_secrets_dynamic(
     shared_secret: &[u8],
     transcript: &TranscriptHash,
@@ -66,11 +61,6 @@ pub fn derive_tls13_handshake_traffic_secrets_dynamic(
     Ok((client_hs_traffic_secret, server_hs_traffic_secret))
 }
 
-/// Derive TLS 1.3 application traffic secrets from handshake secret and final transcript
-/// This follows the same pattern as handshake traffic secrets but uses "application" labels
-/// and the final transcript hash (including all handshake messages up to Finished)
-
-/// Refactored: Accepts TranscriptHash, uses correct hash/HKDF for application secrets
 pub fn derive_tls13_application_traffic_secrets(
     shared_secret: &[u8],
     transcript: &TranscriptHash,
