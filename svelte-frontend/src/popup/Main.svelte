@@ -6,7 +6,6 @@
   import { currentView } from "../stores/navigationStore";
   import SettingsPage from "./SettingsPage.svelte";
   import GradeCard from "./components/GradeCard.svelte";
-  import DetailedReport from "./DetailedReport.svelte";
 
   $: {
     document.body.setAttribute("data-theme", $theme);
@@ -298,23 +297,24 @@
         bind:value={domain}
         disabled={loading}
       />
-      <button
-        class="analyse-button"
-        on:click={() => {
-          analysisInitiated = true;
-          assess(domain);
-        }}
-        disabled={loading || !domain}
-      >
-        {#if loading}
-          Checking...
-        {:else}
-          Analyse
-        {/if}
-      </button>
+      {#if !autoScan}
+        <button
+          class="analyse-button"
+          on:click={() => {
+            analysisInitiated = true;
+            assess(domain);
+          }}
+          disabled={loading || !domain}
+        >
+          {#if loading}
+            Checking...
+          {:else}
+            Analyse
+          {/if}
+        </button>
+      {/if}
     </div>
 
-    <!--If analysis selected SHOW GRADE AND DETAILS LATER-->
     {#if analysisInitiated}
       <div class="results-area">
         {#if loading && !result && !error}
@@ -340,9 +340,5 @@
     {/if}
   {:else if $currentView === "settings"}
     <SettingsPage onGoBack={goToHome} />
-  {:else if $currentView === "detailedReport"}
-    {#if tlsReportData}
-      <DetailedReport handleGoBack={goToHome} {tlsReportData} />
-    {/if}
   {/if}
 </main>

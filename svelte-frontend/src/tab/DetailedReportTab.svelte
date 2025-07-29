@@ -7,9 +7,11 @@
   import { onMount } from "svelte";
   import { get } from "svelte/store";
 
-  // Spinner
+  // Spinner and error states for external scans
   let mozillaLoading = false;
   let mozillaError: string | null = null;
+  let ssllabsLoading = false;
+  let ssllabsError: string | null = null;
 
   async function fetchMozillaObservatory(domain: string) {
     mozillaLoading = true;
@@ -34,6 +36,28 @@
     }
   }
 
+  async function fetchSsllabs(domain: string) {
+    ssllabsLoading = true;
+    ssllabsError = null;
+    try {
+      const resp = await fetch(
+        `http://127.0.0.1:8080/api/observatory?domain=${encodeURIComponent(domain)}&scan_type=ssllabs`
+      );
+      if (!resp.ok) throw new Error(await resp.text());
+      const ssllabsResult = await resp.json();
+      cert.ssllabs_grade = ssllabsResult.grade;
+      cert.ssllabs_scan_time = ssllabsResult.scan_duration;
+      cert = { ...cert };
+    } catch (e: any) {
+      ssllabsError = e.message || "Failed to fetch SSL Labs results.";
+      cert.ssllabs_grade = undefined;
+      cert.ssllabs_scan_time = undefined;
+      cert = { ...cert };
+    } finally {
+      ssllabsLoading = false;
+    }
+  }
+
   onMount(() => {
     // Load theme from localStorage and apply globally
     const savedTheme =
@@ -52,6 +76,7 @@
 
     if (cert.domain) {
       fetchMozillaObservatory(cert.domain);
+      fetchSsllabs(cert.domain);
     }
   });
 
@@ -85,8 +110,8 @@
       <div class="scan-metadata">
         <span class="summary-label">Scan Date:</span>
         <span class="summary-value">
-          {cert.certificate?.valid_to
-            ? formatDate(cert.certificate?.valid_to)
+          {cert.tls_scan_date
+            ? formatDate(cert.tls_scan_date)
             : new Date().toLocaleDateString("en-GB", {
                 day: "2-digit",
                 month: "short",
@@ -162,10 +187,33 @@
         <img src="/ssllabs.jpg" alt="SSL Labs" class="comparison-logo" />
         <div class="comparison-label">SSL Labs</div>
         <div class="comparison-grade">
-          Grade: <span class="grade-badge grade-placeholder">-</span>
+          {#if ssllabsLoading}
+            <span class="spinner"></span>
+            <span class="grade-badge grade-placeholder">Loading...</span>
+          {:else if ssllabsError}
+            <span class="grade-badge grade-placeholder">Error</span>
+          {:else}
+            Grade: <span
+              class="grade-badge grade-{cert.ssllabs_grade
+                ? cert.ssllabs_grade.toLowerCase()
+                : 'placeholder'}"
+            >
+              {cert.ssllabs_grade ? cert.ssllabs_grade : "-"}
+            </span>
+          {/if}
         </div>
         <div class="comparison-time">
-          Scan Time: <span class="status-text">Not Available</span>
+          Scan Time: <span class="status-text">
+            {#if ssllabsLoading}
+              Loading...
+            {:else if ssllabsError}
+              {ssllabsError}
+            {:else}
+              {cert.ssllabs_scan_time
+                ? (cert.ssllabs_scan_time / 1000).toFixed(2) + "s"
+                : "Not Available"}
+            {/if}
+          </span>
         </div>
       </div>
     </div>

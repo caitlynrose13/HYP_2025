@@ -1,4 +1,5 @@
 use crate::services::mozilla_observatory::fetch_observatory_results;
+use crate::services::ssllabs::fetch_ssllabs_results; // Add this import
 use axum::{Json, extract::Query};
 use serde::Deserialize;
 use url::Url;
@@ -29,6 +30,16 @@ pub async fn external_scan(Query(params): Query<ExternalScanQuery>) -> Json<serd
             })),
             Err(e) => {
                 println!("Observatory error: {}", e);
+                Json(serde_json::json!({ "error": e }))
+            }
+        },
+        "ssllabs" => match fetch_ssllabs_results(&domain_to_scan).await {
+            Ok(result) => Json(serde_json::json!({
+                "grade": result.grade,
+                "scan_duration": result.scan_duration,
+            })),
+            Err(e) => {
+                println!("SSL Labs error: {}", e);
                 Json(serde_json::json!({ "error": e }))
             }
         },

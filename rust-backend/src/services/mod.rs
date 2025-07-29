@@ -4,5 +4,6 @@ pub mod errors;
 pub mod mozilla_observatory;
 pub mod scanner;
 pub mod security_grader;
+pub mod ssllabs;
 pub mod tls_handshake;
 pub mod tls_parser;
