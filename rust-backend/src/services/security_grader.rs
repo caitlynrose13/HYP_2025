@@ -162,6 +162,7 @@ pub struct WhoisInfo {
     pub raw: String,
 }
 
+/// Parses WHOIS response for creation date and registrar (simple version)
 pub fn parse_whois_response(response: &str) -> WhoisInfo {
     let mut creation_date = None;
     let mut registrar = None;
@@ -211,7 +212,7 @@ pub fn get_or_run_scan(
     if let Some(whois) = &whois_info {
         let mut reasons = Vec::new();
         if let Some(creation) = whois.creation_date {
-            let now = Utc::now().naive_utc();
+            let now = chrono::Utc::now().naive_utc();
             let age_days = (now - creation).num_days();
             if age_days < 30 {
                 println!(
@@ -234,10 +235,29 @@ pub fn get_or_run_scan(
                     .to_string(),
             );
         }
+        // Check for suspicious registrars (example list, expand as needed)
+        let suspicious_registrars = [
+            "NameCheap",
+            "Alibaba",
+            "Bizcn.com",
+            "Eranet International",
+            "PDR Ltd.",
+        ];
+        if let Some(registrar) = &whois.registrar {
+            for bad in &suspicious_registrars {
+                if registrar.to_lowercase().contains(&bad.to_lowercase()) {
+                    reasons.push(format!(
+                        "Registrar '{}' is known for hosting suspicious domains.",
+                        registrar
+                    ));
+                }
+            }
+        }
         if !reasons.is_empty() {
             explanation = Some(reasons.join(" "));
         }
     }
+
     // Calculate actual certificate expiry if possible
     let mut cert_expiry_days = None;
     if let Some(valid_to) = &certificate.valid_to {

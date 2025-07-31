@@ -92,7 +92,7 @@ pub async fn assess_domain(
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
 
-    // Check cache first (with all assessment details)
+    // Check cache/database first
     let cached_record = match db::get_recent_scan(&state.pool, &domain).await {
         Ok(record) => record,
         Err(e) => {
@@ -101,7 +101,7 @@ pub async fn assess_domain(
         }
     };
     if let Some(record) = cached_record {
-        // Deserialize JSON fields as needed and build AssessmentResponse
+        println!("✓ Loaded scan from database for {}", domain);
         return (
             StatusCode::OK,
             Json(AssessmentResponse {
@@ -118,6 +118,10 @@ pub async fn assess_domain(
             }),
         );
     }
+    println!(
+        "No recent scan found in database for {}, running new assessment...",
+        domain
+    );
 
     // Prepare all info structs
     let mut protocols = ProtocolSupport {
@@ -146,20 +150,11 @@ pub async fn assess_domain(
         preferred_suite: None,
     };
 
-    let vulnerabilities = VulnerabilityInfo {
-        poodle: "Not Vulnerable (TLS 1.2+)".to_string(),
-        beast: "Not Vulnerable (TLS 1.2+)".to_string(),
-        heartbleed: "Unknown".to_string(),
-        freak: "Not Vulnerable (Modern TLS)".to_string(),
-        logjam: "Not Vulnerable (ECDHE)".to_string(),
-    };
-
     let mut key_exchange = KeyExchangeInfo {
         supports_forward_secrecy: false,
         key_exchange_algorithm: None,
         curve_name: None,
     };
-
     // Basic HSTS detection
     let mut hsts_supported = false;
     if let Ok(resp) = reqwest::get(format!("https://{}", domain)).await {
@@ -181,16 +176,6 @@ pub async fn assess_domain(
 
     // WHOIS integration: fetch WHOIS and pass to grading
     let whois_resp = crate::services::security_grader::whois_query(&domain).ok();
-    let (grade, explanation) = crate::services::security_grader::get_or_run_scan(
-        &domain,
-        &grade_input,
-        &certificate_info,
-        &protocols,
-        &cipher_suites,
-        &vulnerabilities,
-        &key_exchange,
-        whois_resp.as_deref(),
-    );
 
     // Test TLS 1.2 support
     let tls12_result =
@@ -199,33 +184,29 @@ pub async fn assess_domain(
             TlsVersion::TLS1_2,
         );
 
-    // Test TLS 1.3 support
-    let tls13_result = crate::services::tls_handshake::tls13::client::test_tls13(&domain);
-
+    // --- TLS 1.2 ---
     match tls12_result {
         Ok((state, cert_der)) => {
             println!("✓ TLS 1.2 handshake succeeded for {}", domain);
             protocols.tls_1_2 = "Supported".to_string();
             grade_input.tls12_supported = true;
 
-            // Set cipher suite info
-            cipher_suites.preferred_suite = Some(state.negotiated_cipher_suite.name.to_string());
-            cipher_suites
-                .tls_1_2_suites
-                .push(state.negotiated_cipher_suite.name.to_string());
+            // Use the negotiated cipher suite bytes and map to name
+            let suite_name = crate::services::tls_parser::get_cipher_suite_name(
+                &state.negotiated_cipher_suite.id,
+            );
+            cipher_suites.preferred_suite = Some(suite_name.clone());
+            cipher_suites.tls_1_2_suites.push(suite_name.clone());
 
-            // Check if cipher is strong
-            grade_input.cipher_is_strong = state.negotiated_cipher_suite.name.contains("GCM");
+            grade_input.cipher_is_strong = suite_name.contains("GCM");
 
-            // Key exchange info
-            if state.negotiated_cipher_suite.name.contains("ECDHE") {
+            if suite_name.contains("ECDHE") {
+                grade_input.forward_secrecy = true;
                 key_exchange.supports_forward_secrecy = true;
                 key_exchange.key_exchange_algorithm = Some("ECDHE".to_string());
                 key_exchange.curve_name = Some("P-256".to_string());
-                grade_input.forward_secrecy = true;
             }
 
-            // Parse certificate if available
             if let Some(cert_der) = cert_der {
                 if let Ok(parsed_cert) = parse_certificate(&cert_der) {
                     certificate_info.common_name = Some(parsed_cert.subject.clone());
@@ -238,7 +219,21 @@ pub async fn assess_domain(
                         "Expired".to_string()
                     });
                     grade_input.cert_valid = !parsed_cert.expired;
-                    certificate_info.days_until_expiry = Some(30); // Placeholder
+
+                    // Calculate days until expiry (TLS 1.2)
+                    if let Some(valid_to) = &certificate_info.valid_to {
+                        if let Ok(dt) =
+                            chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ")
+                        {
+                            let now = chrono::Utc::now().naive_utc();
+                            certificate_info.days_until_expiry = Some((dt - now).num_days());
+                        } else if let Ok(date) =
+                            chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d")
+                        {
+                            let now = chrono::Utc::now().date_naive();
+                            certificate_info.days_until_expiry = Some((date - now).num_days());
+                        }
+                    }
                 }
             }
         }
@@ -247,42 +242,131 @@ pub async fn assess_domain(
         }
     }
 
-    // Check TLS 1.3 support
+    // Test TLS 1.3 support
+    let tls13_result =
+        crate::services::tls_handshake::tls13::client::perform_tls13_handshake_minimal(&domain);
+
+    // --- TLS 1.3 ---
     match tls13_result {
-        Ok(_) => {
-            println!("✓ TLS 1.3 handshake succeeded for {}", domain);
+        Ok((state, Some(cert_der))) => {
+            println!("TLS 1.3 handshake succeeded for {}", domain);
             protocols.tls_1_3 = "Supported".to_string();
             grade_input.tls13_supported = true;
             if !grade_input.forward_secrecy {
                 grade_input.forward_secrecy = true;
                 key_exchange.supports_forward_secrecy = true;
             }
-            cipher_suites
-                .tls_1_3_suites
-                .push("TLS_AES_128_GCM_SHA256".to_string());
-            cipher_suites
-                .tls_1_3_suites
-                .push("TLS_AES_256_GCM_SHA384".to_string());
-            cipher_suites
-                .tls_1_3_suites
-                .push("TLS_CHACHA20_POLY1305_SHA256".to_string());
+
+            // Get the negotiated cipher suite name from the handshake state
+            let suite_name =
+                crate::services::tls_parser::get_cipher_suite_name(&state.negotiated_cipher_suite);
+            cipher_suites.preferred_suite = Some(suite_name.clone());
+            cipher_suites.tls_1_3_suites.push(suite_name);
+
+            // --- TLS 1.3 certificate parsing and expiry calculation ---
+            if let Ok(parsed_cert) = parse_certificate(&cert_der) {
+                certificate_info.common_name = Some(parsed_cert.subject.clone());
+                certificate_info.issuer = Some(parsed_cert.issuer.clone());
+                certificate_info.valid_from = Some(parsed_cert.not_before.clone());
+                certificate_info.valid_to = Some(parsed_cert.not_after.clone());
+                certificate_info.chain_trust = Some(if !parsed_cert.expired {
+                    "Trusted".to_string()
+                } else {
+                    "Expired".to_string()
+                });
+                grade_input.cert_valid = !parsed_cert.expired;
+
+                // Calculate days until expiry (TLS 1.3)
+                if let Some(valid_to) = &certificate_info.valid_to {
+                    if let Ok(dt) =
+                        chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ")
+                    {
+                        let now = chrono::Utc::now().naive_utc();
+                        certificate_info.days_until_expiry = Some((dt - now).num_days());
+                    } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d")
+                    {
+                        let now = chrono::Utc::now().date_naive();
+                        certificate_info.days_until_expiry = Some((date - now).num_days());
+                    }
+                }
+            }
+        }
+        Ok((_, None)) => {
+            println!("No certificate found in TLS 1.3 handshake");
         }
         Err(e) => {
-            println!("✗ TLS 1.3 handshake failed for {}: {:?}", domain, e);
+            println!("TLS 1.3 handshake failed: {:?}", e);
         }
     }
 
     // Check TLS 1.0 and 1.1 support
     protocols.tls_1_0 = if test_tls10(&domain) {
+        grade_input.tls10_supported = true;
         "Supported".to_string()
     } else {
         "Not Supported".to_string()
     };
     protocols.tls_1_1 = if test_tls11(&domain) {
+        grade_input.tls11_supported = true;
         "Supported".to_string()
     } else {
         "Not Supported".to_string()
     };
+
+    // Dynamic vulnerability checks
+    let poodle_status = if protocols.tls_1_0 == "Supported" {
+        "Potentially Vulnerable".to_string()
+    } else {
+        "Not Vulnerable".to_string()
+    };
+
+    let beast_status = if protocols.tls_1_0 == "Supported" {
+        "Potentially Vulnerable".to_string()
+    } else {
+        "Not Vulnerable".to_string()
+    };
+
+    // Heartbleed left as "Unknown" for now
+    let heartbleed_status = "Unknown".to_string();
+
+    let freak_status = if cipher_suites
+        .tls_1_2_suites
+        .iter()
+        .any(|s| s.contains("EXPORT"))
+    {
+        "Potentially Vulnerable".to_string()
+    } else {
+        "Not Vulnerable".to_string()
+    };
+
+    let logjam_status = if let Some(suite) = &cipher_suites.preferred_suite {
+        if suite.contains("ECDHE") {
+            "Not Vulnerable".to_string()
+        } else {
+            "Potentially Vulnerable".to_string()
+        }
+    } else {
+        "Unknown".to_string()
+    };
+
+    let vulnerabilities = VulnerabilityInfo {
+        poodle: poodle_status,
+        beast: beast_status,
+        heartbleed: heartbleed_status,
+        freak: freak_status,
+        logjam: logjam_status,
+    };
+
+    let (grade, explanation) = crate::services::security_grader::get_or_run_scan(
+        &domain,
+        &grade_input,
+        &certificate_info,
+        &protocols,
+        &cipher_suites,
+        &vulnerabilities,
+        &key_exchange,
+        whois_resp.as_deref(),
+    );
 
     println!("Final Grade: {:?}", grade);
     println!("=== Assessment Complete ===\n");
@@ -291,13 +375,13 @@ pub async fn assess_domain(
     let scan_duration_str = format!("{:.2}s", scan_duration);
 
     // Insert scan record into the database
+    println!("Inserting new scan record into database for {}", domain);
     let certificate_json = serde_json::to_string(&certificate_info).unwrap();
     let protocols_json = serde_json::to_string(&protocols).unwrap();
     let cipher_suites_json = serde_json::to_string(&cipher_suites).unwrap();
     let vulnerabilities_json = serde_json::to_string(&vulnerabilities).unwrap();
     let key_exchange_json = serde_json::to_string(&key_exchange).unwrap();
     let details_json = "{}";
-
     let scanned_by = "anonymous";
 
     let _ = insert_scan(

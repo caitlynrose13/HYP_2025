@@ -28,10 +28,9 @@ pub struct Tls13ConnectionState {
     pub client_random: [u8; 32],
     pub transcript_hash: Vec<u8>,
 }
-/// Perform a minimal TLS 1.3 handshake to derive traffic secrets.
-/// This function sends a ClientHello, processes the ServerHello, and handles encrypted handshake messages.
-pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionState, TlsError> {
-    // 1. Generate client random and X25519 keypair with timestamp to ensure uniqueness
+pub fn perform_tls13_handshake_minimal(
+    domain: &str,
+) -> Result<(Tls13ConnectionState, Option<Vec<u8>>), TlsError> {
     let rng = SystemRandom::new();
     let mut client_random = [0u8; 32];
     rng.fill(&mut client_random).map_err(|e| {
@@ -58,7 +57,6 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
         arr
     };
 
-    // 2. Build and send ClientHello
     let client_hello = build_client_hello(domain, &client_random, &client_public_bytes);
     use crate::services::tls_handshake::tls13::messages::build_raw_client_hello_handshake;
     let _raw_client_hello =
@@ -79,6 +77,7 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
         )));
     }
 
+    // Parse handshake messages to find the Certificate message
     let handshake_messages = parse_handshake_messages(&server_hello_record.payload)?;
     let server_hello_msg = handshake_messages
         .get(0)
@@ -100,8 +99,6 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
         .try_into()
         .map_err(|_| TlsError::KeyExchangeError("Invalid server key length".to_string()))?;
 
-    // 4. Update transcript and derive secrets using proper TLS 1.3 key schedule
-    // Select hash algorithm for key schedule
     let cipher_suite_obj = CipherSuite::new(negotiated_cipher_suite[0], negotiated_cipher_suite[1]);
     if cipher_suite_obj.id == [0x00, 0x00] {
         return Err(TlsError::UnsupportedCipherSuite(format!(
@@ -115,13 +112,8 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
     };
     let mut transcript = TranscriptHash::new(hash_alg.clone());
 
-    // Update transcript with handshake messages (RFC: header + payload)
-    // ClientHello: skip record header (5 bytes), the remaining is handshake header+payload
-    // The client_hello[5..] already contains the complete handshake message (header + payload)
     transcript.update(&client_hello[5..]);
 
-    // CRITICAL FIX: Use parsed handshake message raw_bytes to ensure 4-byte header is included
-    // The server_hello_msg.raw_bytes contains the exact handshake message (type + 3-byte length + payload)
     transcript.update(&server_hello_msg.raw_bytes);
 
     // Use ring to perform X25519 key exchange
@@ -144,13 +136,9 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
             hash_alg.clone(),
         )?;
 
-    // CRITICAL FIX: Process encrypted handshake records FIRST, before deriving application secrets
-    // This ensures we have the complete transcript hash including ServerFinished
     let cipher_suite_obj = CipherSuite::new(negotiated_cipher_suite[0], negotiated_cipher_suite[1]);
 
-    // During handshake phase, we only need handshake traffic secrets
-    // Application secrets will be derived after the complete handshake transcript
-    let dummy_app_secret = vec![0u8; server_hs_traffic_secret.len()]; // Dummy - not used during handshake
+    let dummy_app_secret = vec![0u8; server_hs_traffic_secret.len()];
 
     let _decrypted_records = process_encrypted_handshake_records(
         &mut stream,
@@ -159,22 +147,13 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
         &cipher_suite_obj,
         &mut transcript,
     )?;
-    // No debug output
 
-    // NOW derive application traffic secrets with the complete transcript (after handshake)
     use crate::services::tls_handshake::tls13::key_schedule::derive_tls13_application_traffic_secrets;
     let (_client_app_traffic_secret, server_app_traffic_secret) =
         derive_tls13_application_traffic_secrets(&shared_secret, &transcript, hash_alg.clone())?;
 
-    // Test application data decryption by reading what the server sends after handshake
-    // Remove the HTTP request sending - we should not send plaintext over TLS
-
-    // The sequence number for encrypted records starts from 0
-    // The first encrypted record from server is sequence 0
-
     use crate::services::tls_handshake::tls13::record_layer::decrypt_record;
 
-    // Try to read multiple records to see what the server sends post-handshake
     let mut handshake_sequence_number = 0u64; // Start from 0 for first encrypted record
 
     for _attempt in 0..3 {
@@ -271,28 +250,40 @@ pub fn perform_tls13_handshake_minimal(domain: &str) -> Result<Tls13ConnectionSt
             }
         }
     }
-    // No debug output
 
-    // Certificate validation (trace logging)
-    // No debug output
-    Ok(Tls13ConnectionState {
-        client_secret: None, // ring does not expose private key bytes
-        client_public: client_public_bytes.try_into().unwrap(),
-        server_public,
-        shared_secret,
-        client_hs_traffic_secret: client_hs_traffic_secret.clone(),
-        server_hs_traffic_secret: server_hs_traffic_secret.clone(),
-        negotiated_cipher_suite,
-        server_random,
-        client_random,
-        transcript_hash: transcript
-            .clone_hash()
-            .map_err(|e| TlsError::HandshakeError(e.to_string()))?,
-    })
+    // Extract certificate bytes from handshake messages
+    let mut server_certificate: Option<Vec<u8>> = None;
+    for msg in handshake_messages.iter() {
+        if msg.msg_type == HandshakeMessageType::Certificate {
+            // Parse the certificate list (skip first 4 bytes if needed)
+            if let Ok(certificates) =
+                crate::services::tls_parser::parse_certificate_list(&msg.raw_bytes[4..])
+            {
+                server_certificate = certificates.get(0).cloned();
+            }
+            break;
+        }
+    }
+
+    Ok((
+        Tls13ConnectionState {
+            client_secret: None, // ring does not expose private key bytes
+            client_public: client_public_bytes.try_into().unwrap(),
+            server_public,
+            shared_secret,
+            client_hs_traffic_secret: client_hs_traffic_secret.clone(),
+            server_hs_traffic_secret: server_hs_traffic_secret.clone(),
+            negotiated_cipher_suite,
+            server_random,
+            client_random,
+            transcript_hash: transcript
+                .clone_hash()
+                .map_err(|e| TlsError::HandshakeError(e.to_string()))?,
+        },
+        server_certificate,
+    ))
 }
 
-/// Clean test function to perform a TLS 1.3 handshake with any domain
-/// Returns Ok(()) if handshake succeeds, Err(TlsError) otherwise. No output.
-pub fn test_tls13(domain: &str) -> Result<(), TlsError> {
-    perform_tls13_handshake_minimal(domain).map(|_| ())
+pub fn test_tls13(domain: &str) -> Result<Option<Vec<u8>>, TlsError> {
+    perform_tls13_handshake_minimal(domain).map(|(_state, cert)| cert)
 }

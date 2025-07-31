@@ -560,6 +560,16 @@ pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<&'static CipherSuite> {
     }
 }
 
+pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
+    match suite {
+        [0x13, 0x01] => "TLS_AES_128_GCM_SHA256".to_string(),
+        [0x13, 0x02] => "TLS_AES_256_GCM_SHA384".to_string(),
+        [0x13, 0x03] => "TLS_CHACHA20_POLY1305_SHA256".to_string(),
+        // Add more
+        _ => format!("Unknown ({:02x}{:02x})", suite[0], suite[1]),
+    }
+}
+
 #[allow(dead_code)]
 pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
     if payload.len() < 2 {
