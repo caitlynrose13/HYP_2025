@@ -1,3 +1,9 @@
+use sqlx::SqlitePool;
+pub mod db;
 pub mod handlers;
 pub mod services;
-pub mod utils;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: SqlitePool,
+}

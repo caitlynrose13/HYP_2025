@@ -162,7 +162,6 @@ pub struct WhoisInfo {
     pub raw: String,
 }
 
-/// Parses WHOIS response for creation date and registrar (simple version)
 pub fn parse_whois_response(response: &str) -> WhoisInfo {
     let mut creation_date = None;
     let mut registrar = None;
@@ -192,35 +191,6 @@ pub fn parse_whois_response(response: &str) -> WhoisInfo {
     }
 }
 
-const LOG_PATH: &str = "scan_log.json";
-
-pub fn load_cache() -> HashMap<String, CachedScan> {
-    if !Path::new(LOG_PATH).exists() {
-        return HashMap::new();
-    }
-    let mut file = match File::open(LOG_PATH) {
-        Ok(f) => f,
-        Err(_) => return HashMap::new(),
-    };
-    let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_ok() {
-        serde_json::from_str(&contents).unwrap_or_default()
-    } else {
-        HashMap::new()
-    }
-}
-
-fn save_cache(cache: &HashMap<String, CachedScan>) {
-    if let Ok(json) = serde_json::to_string_pretty(cache) {
-        let _ = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(LOG_PATH)
-            .and_then(|mut f| f.write_all(json.as_bytes()));
-    }
-}
-
 pub fn get_or_run_scan(
     domain: &str,
     input: &GradeInput,
@@ -230,19 +200,13 @@ pub fn get_or_run_scan(
     vulnerabilities: &VulnerabilityInfo,
     key_exchange: &KeyExchangeInfo,
     whois_response: Option<&str>,
-) -> (Grade, bool) {
-    let mut cache = load_cache();
+) -> (Grade, Option<String>) {
     let whois_info = whois_response.map(|resp| parse_whois_response(resp));
-    if let Some(cached) = cache.get(domain) {
-        if cached.details == *input {
-            // Return cached result only if input matches
-            return (cached.grade, true);
-        }
-        // Input changed, re-run scan and update cache
-    }
+
     println!("[DEBUG] Grading input for domain {}: {:?}", domain, input);
     let mut grade = grade_site(input);
     let mut explanation = None;
+
     // WHOIS-based downgrade: if domain is younger than 30 days, downgrade to F
     if let Some(whois) = &whois_info {
         let mut reasons = Vec::new();
@@ -270,24 +234,6 @@ pub fn get_or_run_scan(
                     .to_string(),
             );
         }
-        // Check for suspicious registrars (example list, expand as needed)
-        let suspicious_registrars = [
-            "NameCheap",
-            "Alibaba",
-            "Bizcn.com",
-            "Eranet International",
-            "PDR Ltd.",
-        ];
-        if let Some(registrar) = &whois.registrar {
-            for bad in &suspicious_registrars {
-                if registrar.to_lowercase().contains(&bad.to_lowercase()) {
-                    reasons.push(format!(
-                        "Registrar '{}' is known for hosting suspicious domains.",
-                        registrar
-                    ));
-                }
-            }
-        }
         if !reasons.is_empty() {
             explanation = Some(reasons.join(" "));
         }
@@ -304,21 +250,5 @@ pub fn get_or_run_scan(
             cert_expiry_days = Some((date - now).num_days());
         }
     }
-    let mut cert = certificate.clone();
-    cert.days_until_expiry = cert_expiry_days;
-    let entry = CachedScan {
-        domain: domain.to_string(),
-        grade,
-        details: input.clone(),
-        certificate: cert,
-        protocols: protocols.clone(),
-        cipher_suites: cipher_suites.clone(),
-        vulnerabilities: vulnerabilities.clone(),
-        key_exchange: key_exchange.clone(),
-        whois: whois_info,
-        explanation,
-    };
-    cache.insert(domain.to_string(), entry);
-    save_cache(&cache);
-    (grade, false)
+    (grade, explanation)
 }
