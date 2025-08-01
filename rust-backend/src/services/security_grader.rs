@@ -155,9 +155,8 @@ pub fn get_or_run_scan(
     (grade, explanation)
 }
 
-// ============================================================================
+// =========================
 // WHOIS HELPER FUNCTIONS
-// ============================================================================
 
 fn extract_tld(domain: &str) -> String {
     domain.split('.').last().unwrap_or("").to_lowercase()
@@ -221,20 +220,32 @@ fn extract_registrar(response: &str) -> Option<String> {
 // GRADING HELPER FUNCTIONS
 
 fn apply_protocol_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &GradeInput) {
-    if !input.tls12_supported {
+    // Check if ANY modern TLS version is supported
+    if !input.tls12_supported && !input.tls13_supported {
         *score = 0;
-        reasons.push("Does not support TLS 1.2 or higher.".to_string());
+        reasons.push("Does not support any modern TLS version (1.2 or 1.3).".to_string());
         return;
     }
 
-    if !input.tls13_supported {
+    // Bonus for TLS 1.3 support
+    if input.tls13_supported {
+        // TLS 1.3 is excellent - minimal penalty if TLS 1.2 not supported
+        if !input.tls12_supported {
+            *score -= 5; // Very minor penalty for limited compatibility
+            reasons.push(
+                "Only supports TLS 1.3 (excellent security, limited compatibility).".to_string(),
+            );
+        }
+    } else if input.tls12_supported {
+        // Only TLS 1.2 - moderate penalty
         *score -= 10;
-        reasons.push("Does not support TLS 1.3.".to_string());
+        reasons.push("Does not support TLS 1.3 (recommended modern standard).".to_string());
     }
 
+    // Penalty for supporting obsolete protocols
     if input.tls10_supported || input.tls11_supported {
         *score -= 20;
-        reasons.push("Supports obsolete TLS 1.0 or 1.1.".to_string());
+        reasons.push("Supports obsolete TLS 1.0 or 1.1 protocols.".to_string());
     }
 
     if !input.weak_protocols_disabled {

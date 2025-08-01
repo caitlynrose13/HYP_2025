@@ -1,7 +1,13 @@
-// =============================
-// Removed x25519_dalek EphemeralSecret and PublicKey
-// Imports
-// =============================
+//! TLS Key Derivation and Cryptographic Operations
+//!
+//! This module provides comprehensive key derivation and cryptographic functions for both
+//! TLS 1.2 and TLS 1.3 protocols. It handles:
+//! - HKDF operations (TLS 1.3)
+//! - PRF operations (TLS 1.2)
+//! - AEAD cipher management
+//! - Key schedule implementations
+//! - Finished message verification
+
 use crate::services::errors::TlsError;
 use crate::services::tls_parser::{CipherSuite, TlsContentType, TlsVersion};
 use aes::{Aes128, Aes256};
@@ -9,164 +15,20 @@ use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{AesGcm, KeyInit};
 use hmac::{Hmac, Mac};
-use ring::hkdf::{HKDF_SHA256, KeyType, Prk, Salt};
+use ring::hkdf::{HKDF_SHA256, HKDF_SHA384, KeyType, Prk, Salt};
 use sha2::digest::Digest;
 use sha2::{Sha256, Sha384};
 use typenum::{U12, U16};
 
-// =============================
-// TLS 1.3 Key Schedule & HKDF
-/// HKDF-Extract for TLS 1.3 (RFC 8446) - static SHA-256 version
-pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<ring::hkdf::Prk, TlsError> {
-    let salt = Salt::new(HKDF_SHA256, salt);
-    let prk = salt.extract(ikm);
-    Ok(prk)
-}
-
-/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1) - static SHA-256 version
-pub fn hkdf_expand_label(
-    prk: &ring::hkdf::Prk,
-    label: &[u8],
-    context: &[u8],
-    length: usize,
-) -> Result<Vec<u8>, TlsError> {
-    // TLS 1.3 label prefix
-    let mut full_label = b"tls13 ".to_vec();
-    full_label.extend_from_slice(label);
-    // Structure: length (2 bytes) | label len (1 byte) | label | context len (1 byte) | context
-    let mut info = Vec::new();
-    info.extend_from_slice(&(length as u16).to_be_bytes());
-    info.push(full_label.len() as u8);
-    info.extend_from_slice(&full_label);
-    info.push(context.len() as u8);
-    info.extend_from_slice(context);
-    let info_slice = info.as_slice();
-    let info_ref = [info_slice];
-    struct OkmLen(usize);
-    impl KeyType for OkmLen {
-        fn len(&self) -> usize {
-            self.0
-        }
-    }
-    let okm = prk
-        .expand(&info_ref, OkmLen(length))
-        .map_err(|_| TlsError::KeyDerivationError("HKDF expand error".into()))?;
-    let mut out = vec![0u8; length];
-    okm.fill(&mut out)
-        .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
-
-    Ok(out)
-}
-// =============================
-
-/// HKDF-Extract for TLS 1.3 (RFC 8446) with dynamic hash selection
-pub fn hkdf_extract_dynamic(salt: &[u8], ikm: &[u8], use_sha384: bool) -> Prk {
-    let algorithm = if use_sha384 {
-        ring::hkdf::HKDF_SHA384
-    } else {
-        ring::hkdf::HKDF_SHA256
-    };
-    Salt::new(algorithm, salt).extract(ikm)
-}
-
-/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1) with dynamic hash selection
-pub fn hkdf_expand_label_dynamic(
-    prk: &Prk,
-    label: &[u8],
-    context: &[u8],
-    length: usize,
-    _use_sha384: bool,
-) -> Result<Vec<u8>, TlsError> {
-    let mut full_label = b"tls13 ".to_vec();
-    full_label.extend_from_slice(label);
-
-    let mut info = Vec::with_capacity(2 + 1 + full_label.len() + 1 + context.len());
-    info.extend_from_slice(&(length as u16).to_be_bytes()); // Length of output key material (L)
-    info.push(full_label.len() as u8); // Length of label (Lk)
-    info.extend_from_slice(&full_label); // Key label
-    info.push(context.len() as u8); // Length of context (Lc)
-    info.extend_from_slice(context); // Context
-
-    struct OkmLen(usize);
-    impl ring::hkdf::KeyType for OkmLen {
-        fn len(&self) -> usize {
-            self.0
-        }
-    }
-
-    let info_ref = [info.as_slice()];
-    let okm = prk
-        .expand(&info_ref, OkmLen(length))
-        .map_err(|_| TlsError::KeyDerivationError("HKDF expand error".into()))?;
-    let mut out = vec![0u8; length];
-    okm.fill(&mut out)
-        .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
-
-    Ok(out)
-}
-
-/// TLS 1.3 Key Schedule: Derive handshake traffic secrets (RFC 8446)
-/// Selects SHA256/SHA384 and HKDF variant based on cipher suite
-pub fn derive_tls13_handshake_traffic_secrets_dynamic(
-    shared_secret: &[u8],
-    transcript_hash: &[u8],
-    use_sha384: bool,
-) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
-    // RFC: early_secret = HKDF-Extract(zeros, ikm)
-    let zeroes = if use_sha384 {
-        vec![0u8; 48]
-    } else {
-        vec![0u8; 32]
-    };
-    let early_secret_prk = hkdf_extract_dynamic(&zeroes, &zeroes, use_sha384);
-    // RFC: empty_hash = Hash("")
-    let empty_hash = if use_sha384 {
-        let mut hasher = Sha384::default();
-        hasher.update(&[]);
-        hasher.finalize().to_vec()
-    } else {
-        let mut hasher = Sha256::default();
-        hasher.update(&[]);
-        hasher.finalize().to_vec()
-    };
-    // RFC: derived_secret = HKDF-Expand-Label(early_secret, "derived", empty_hash, hash_len)
-    let hash_len = if use_sha384 { 48 } else { 32 };
-    let derived_secret = hkdf_expand_label_dynamic(
-        &early_secret_prk,
-        b"derived",
-        &empty_hash,
-        hash_len,
-        use_sha384,
-    )?;
-    // RFC: handshake_secret = HKDF-Extract(derived_secret, shared_secret)
-    let handshake_secret_prk = hkdf_extract_dynamic(&derived_secret, shared_secret, use_sha384);
-    // RFC: client/server handshake traffic secrets
-    let client_hs_traffic_secret = hkdf_expand_label_dynamic(
-        &handshake_secret_prk,
-        b"c hs traffic",
-        transcript_hash,
-        hash_len,
-        use_sha384,
-    )?;
-    let server_hs_traffic_secret = hkdf_expand_label_dynamic(
-        &handshake_secret_prk,
-        b"s hs traffic",
-        transcript_hash,
-        hash_len,
-        use_sha384,
-    )?;
-    Ok((client_hs_traffic_secret, server_hs_traffic_secret))
-}
-
-// =============================
-// TLS 1.2 Key Schedule & PRF
-// =============================
-
-//  AEAD Cipher Enum
+/// AEAD cipher variants supported by the TLS implementation
+///
+/// Provides a unified interface for different AES-GCM key sizes while
+/// maintaining type safety and zero-cost abstractions.
 #[derive(Clone)]
 pub enum TlsAeadCipher {
-    //External Rust Library that does the actual encryption/decryption (I only prepare the data, nonce and AAD)
+    /// AES-128-GCM cipher (16-byte key, 12-byte nonce, 16-byte tag)
     Aes128Gcm(AesGcm<Aes128, U12, U16>),
+    /// AES-256-GCM cipher (32-byte key, 12-byte nonce, 16-byte tag)
     Aes256Gcm(AesGcm<Aes256, U12, U16>),
 }
 
@@ -179,59 +41,185 @@ impl std::fmt::Debug for TlsAeadCipher {
     }
 }
 
-//
+/// TLS 1.2 PRF labels as defined in RFC 5246
 const TLS12_PRF_LABEL_MASTER_SECRET: &[u8] = b"master secret";
 const TLS12_PRF_LABEL_KEY_EXPANSION: &[u8] = b"key expansion";
 
-/// calc the master secret using PRF (TLS1.2) => ****NEED TO BE CHANGED FOR TLS1.3!!!!!!!********
+/// TLS 1.3 label prefix as defined in RFC 8446
+const TLS13_LABEL_PREFIX: &[u8] = b"tls13 ";
+
+// =================================
+// TLS 1.3 KEY DERIVATION (HKDF-BASED)
+
+/// HKDF-Extract for TLS 1.3 (RFC 8446) - static SHA-256 version
+///
+/// Extracts a fixed-length pseudorandom key from input key material.
+/// This is the first stage of HKDF and produces a PRK (pseudorandom key).
+pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<Prk, TlsError> {
+    let salt = Salt::new(HKDF_SHA256, salt);
+    let prk = salt.extract(ikm);
+    Ok(prk)
+}
+
+/// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1) - static SHA-256 version
+///
+/// Expands a PRK into output key material using the TLS 1.3 label format.
+/// The label is automatically prefixed with "tls13 " as required by RFC 8446.
+pub fn hkdf_expand_label(
+    prk: &Prk,
+    label: &[u8],
+    context: &[u8],
+    length: usize,
+) -> Result<Vec<u8>, TlsError> {
+    // Construct TLS 1.3 label with required prefix
+    let mut full_label = TLS13_LABEL_PREFIX.to_vec();
+    full_label.extend_from_slice(label);
+
+    // Build HKDFLabel structure per RFC 8446
+    let hkdf_label = build_hkdf_label(length as u16, &full_label, context);
+
+    // Expand using the constructed label
+    expand_with_info(prk, &hkdf_label, length)
+}
+
+/// HKDF-Extract with dynamic hash algorithm selection
+///
+/// Supports both SHA-256 and SHA-384 based on the cipher suite requirements.
+/// Used primarily for TLS 1.3 key schedule operations.
+pub fn hkdf_extract_dynamic(salt: &[u8], ikm: &[u8], use_sha384: bool) -> Prk {
+    let algorithm = if use_sha384 { HKDF_SHA384 } else { HKDF_SHA256 };
+    Salt::new(algorithm, salt).extract(ikm)
+}
+
+/// HKDF-Expand-Label with dynamic hash algorithm selection
+///
+/// Provides the same functionality as `hkdf_expand_label` but with runtime
+/// hash algorithm selection for cipher suites that use SHA-384.
+pub fn hkdf_expand_label_dynamic(
+    prk: &Prk,
+    label: &[u8],
+    context: &[u8],
+    length: usize,
+    _use_sha384: bool, // Algorithm is already embedded in the PRK
+) -> Result<Vec<u8>, TlsError> {
+    // Construct full label with TLS 1.3 prefix
+    let mut full_label = TLS13_LABEL_PREFIX.to_vec();
+    full_label.extend_from_slice(label);
+
+    // Build HKDFLabel structure
+    let hkdf_label = build_hkdf_label(length as u16, &full_label, context);
+
+    // Expand using the constructed label
+    expand_with_info(prk, &hkdf_label, length)
+}
+
+/// TLS 1.3 Key Schedule: Derive handshake traffic secrets (RFC 8446)
+///
+/// Implements the TLS 1.3 key schedule for deriving client and server
+/// handshake traffic secrets from the shared ECDHE secret.
+pub fn derive_tls13_handshake_traffic_secrets_dynamic(
+    shared_secret: &[u8],
+    transcript_hash: &[u8],
+    use_sha384: bool,
+) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
+    let hash_len = if use_sha384 { 48 } else { 32 };
+    let zeroes = vec![0u8; hash_len];
+
+    // RFC 8446: Early-Secret = HKDF-Extract(0, 0)
+    let early_secret_prk = hkdf_extract_dynamic(&zeroes, &zeroes, use_sha384);
+
+    // RFC 8446: empty_hash = Hash("")
+    let empty_hash = compute_empty_hash(use_sha384);
+
+    // RFC 8446: derived_secret = HKDF-Expand-Label(Early-Secret, "derived", empty_hash, Hash.length)
+    let derived_secret = hkdf_expand_label_dynamic(
+        &early_secret_prk,
+        b"derived",
+        &empty_hash,
+        hash_len,
+        use_sha384,
+    )?;
+
+    // RFC 8446: Handshake-Secret = HKDF-Extract(derived_secret, shared_secret)
+    let handshake_secret_prk = hkdf_extract_dynamic(&derived_secret, shared_secret, use_sha384);
+
+    // RFC 8446: Derive client and server handshake traffic secrets
+    let client_hs_traffic_secret = hkdf_expand_label_dynamic(
+        &handshake_secret_prk,
+        b"c hs traffic",
+        transcript_hash,
+        hash_len,
+        use_sha384,
+    )?;
+
+    let server_hs_traffic_secret = hkdf_expand_label_dynamic(
+        &handshake_secret_prk,
+        b"s hs traffic",
+        transcript_hash,
+        hash_len,
+        use_sha384,
+    )?;
+
+    Ok((client_hs_traffic_secret, server_hs_traffic_secret))
+}
+
+// =====================================
+// TLS 1.2 KEY DERIVATION (PRF-BASED)
+
+/// Calculates the TLS 1.2 master secret using the PRF
+///
+/// RFC 5246: master_secret = PRF(pre_master_secret, "master secret",
+///                               ClientHello.random + ServerHello.random)[0..47]
 pub fn calculate_master_secret(
     pre_master_secret: &[u8],
     client_random: &[u8; 32],
     server_random: &[u8; 32],
     hash_algorithm: crate::services::tls_parser::HashAlgorithm,
 ) -> Result<[u8; 48], TlsError> {
-    // The seed for master secret is client_random + server_random
-    let mut actual_seed_for_prf = Vec::with_capacity(client_random.len() + server_random.len()); //seed is client random + server random, first get capacity
-    actual_seed_for_prf.extend_from_slice(client_random);
-    actual_seed_for_prf.extend_from_slice(server_random);
+    // Construct seed: client_random + server_random
+    let mut seed = Vec::with_capacity(64);
+    seed.extend_from_slice(client_random);
+    seed.extend_from_slice(server_random);
 
-    let mut master_secret = [0u8; 48]; //48 bytes for the master secret
+    let mut master_secret = [0u8; 48];
     prf_tls12(
-        //call the prf function for 1.2 specifically
         pre_master_secret,
-        TLS12_PRF_LABEL_MASTER_SECRET, //call prf with "master secret" label
-        &actual_seed_for_prf,
-        &mut master_secret, //sent as a mutable reference as result
+        TLS12_PRF_LABEL_MASTER_SECRET,
+        &seed,
+        &mut master_secret,
         hash_algorithm,
     )
-    .map_err(|e| TlsError::KeyDerivationError(format!("PRF error: {}", e)))?;
+    .map_err(|e| TlsError::KeyDerivationError(format!("Master secret PRF error: {}", e)))?;
 
     Ok(master_secret)
 }
 
-/// Key Block using new master secret, contains mac key, client key, server key, client iv, server iv
+/// Calculates the TLS 1.2 key block for deriving encryption keys
+///
+/// RFC 5246: key_block = PRF(SecurityParameters.master_secret,
+///                           "key expansion",
+///                           SecurityParameters.server_random + SecurityParameters.client_random)
 pub fn calculate_key_block(
     master_secret: &[u8],
     server_random: &[u8; 32],
     client_random: &[u8; 32],
-    cipher_suite: &CipherSuite, // contains mac key, client key, server key, client iv, server iv
+    cipher_suite: &CipherSuite,
 ) -> Result<Vec<u8>, TlsError> {
-    // The seed key block is server_random + client_random ** master secret is client_random + server_random
-    let mut actual_seed_for_prf = Vec::with_capacity(server_random.len() + client_random.len());
-    actual_seed_for_prf.extend_from_slice(server_random);
-    actual_seed_for_prf.extend_from_slice(client_random);
+    // Construct seed: server_random + client_random (note the order!)
+    let mut seed = Vec::with_capacity(64);
+    seed.extend_from_slice(server_random);
+    seed.extend_from_slice(client_random);
 
-    //times by two since for client and server
+    // Calculate total key material needed
     let total_len = 2
         * (cipher_suite.mac_key_length + cipher_suite.key_length + cipher_suite.fixed_iv_length)
             as usize;
 
     let mut key_block = vec![0u8; total_len];
     prf_tls12(
-        //call prf with "key expansion" label
         master_secret,
         TLS12_PRF_LABEL_KEY_EXPANSION,
-        &actual_seed_for_prf,
+        &seed,
         &mut key_block,
         cipher_suite.hash_algorithm,
     )
@@ -240,7 +228,10 @@ pub fn calculate_key_block(
     Ok(key_block)
 }
 
-///TLS 1.2 Pseudorandom Function (PRF) (TLS 1.2 with SHA256 or SHA384)
+/// TLS 1.2 Pseudorandom Function (PRF) implementation
+///
+/// RFC 5246: PRF(secret, label, seed) = P_hash(secret, label + seed)
+/// Supports both SHA-256 and SHA-384 hash functions.
 pub fn prf_tls12(
     secret: &[u8],
     label: &[u8],
@@ -248,101 +239,30 @@ pub fn prf_tls12(
     result: &mut [u8],
     hash_algorithm: crate::services::tls_parser::HashAlgorithm,
 ) -> Result<(), String> {
+    // Concatenate label and seed
     let mut label_and_seed = Vec::with_capacity(label.len() + seed.len());
     label_and_seed.extend_from_slice(label);
-    label_and_seed.extend_from_slice(seed); //concat the label and the seed
+    label_and_seed.extend_from_slice(seed);
 
-    //call the p_hash function with the hash algorithm, secret, label and seed
-    tls12_prf_p_hash(hash_algorithm, secret, &label_and_seed, result) //update the result with the p_hash function
+    // Apply P_hash function
+    tls12_prf_p_hash(hash_algorithm, secret, &label_and_seed, result)
 }
 
-//p_hash function for TLS 1.2  HMAC using SHA256 or SHA384
-fn tls12_prf_p_hash(
-    hash_algorithm: crate::services::tls_parser::HashAlgorithm,
-    secret: &[u8],
-    seed: &[u8],
-    output: &mut [u8],
-) -> Result<(), String> {
-    match hash_algorithm {
-        //match the hash algorithm
-        crate::services::tls_parser::HashAlgorithm::Sha256 => {
-            tls12_prf_p_hash_sha256(secret, seed, output)
-        }
-        crate::services::tls_parser::HashAlgorithm::Sha384 => {
-            tls12_prf_p_hash_sha384(secret, seed, output)
-        }
-    }
-}
+// ===================================
+// AEAD OPERATIONS
 
-//P_hash(secret,seed)=HMAC(secret,A(1)+seed)+HMAC(secret,A(2)+seed)...
-//p_hash function for TLS 1.2  HMAC using SHA256
-fn tls12_prf_p_hash_sha256(secret: &[u8], seed: &[u8], output: &mut [u8]) -> Result<(), String> {
-    let mut a_i = seed.to_vec(); //a_i is the seed as bytes
-    let mut current_output_len = 0; //current output length
-
-    //keep generating HMAC(secret,A(i)+seed) until the output is filled
-    while current_output_len < output.len() {
-        //A(0) = seed, A(1)= HMAC(secret,A(0)+seed), A(2)= HMAC(secret,A(1)+seed), ...
-        let mut mac_a = <Hmac<Sha256> as Mac>::new_from_slice(secret)
-            .map_err(|_| "HMAC error (A(i))".to_string())?;
-        mac_a.update(&a_i);
-        a_i = mac_a.finalize().into_bytes().to_vec();
-
-        //outputblock
-        let mut mac_p = <Hmac<Sha256> as Mac>::new_from_slice(secret)
-            .map_err(|_| "HMAC error (P_hash)".to_string())?;
-        mac_p.update(&a_i);
-        mac_p.update(seed);
-        let hmac_result = mac_p.finalize().into_bytes();
-
-        let to_copy = std::cmp::min(hmac_result.len(), output.len() - current_output_len);
-        output[current_output_len..current_output_len + to_copy]
-            .copy_from_slice(&hmac_result[..to_copy]);
-
-        current_output_len += to_copy;
-    }
-
-    Ok(())
-}
-
-//same but for SHA384
-fn tls12_prf_p_hash_sha384(secret: &[u8], seed: &[u8], output: &mut [u8]) -> Result<(), String> {
-    let mut a_i = seed.to_vec();
-    let mut current_output_len = 0;
-
-    while current_output_len < output.len() {
-        let mut mac_a = <Hmac<Sha384> as Mac>::new_from_slice(secret)
-            .map_err(|_| "HMAC error (A(i))".to_string())?;
-        mac_a.update(&a_i);
-        a_i = mac_a.finalize().into_bytes().to_vec();
-
-        let mut mac_p = <Hmac<Sha384> as Mac>::new_from_slice(secret)
-            .map_err(|_| "HMAC error (P_hash)".to_string())?;
-        mac_p.update(&a_i);
-        mac_p.update(seed);
-        let hmac_result = mac_p.finalize().into_bytes();
-
-        let to_copy = std::cmp::min(hmac_result.len(), output.len() - current_output_len);
-        output[current_output_len..current_output_len + to_copy]
-            .copy_from_slice(&hmac_result[..to_copy]);
-
-        current_output_len += to_copy;
-    }
-
-    Ok(())
-}
-
-///AEAD Derivation (TLS 1.2 AES-GCM) (Authenticated Encryption with Associated Data)
+/// Derives AEAD keys from TLS 1.2 key block
+///
+/// Extracts client/server encryption keys and initialization vectors from
+/// the key block and creates ready-to-use AEAD cipher instances.
 pub fn derive_aead_keys(
-    cipher_suite: &CipherSuite, //key length and iv length
+    cipher_suite: &CipherSuite,
     key_block: &[u8],
 ) -> Result<(TlsAeadCipher, Vec<u8>, TlsAeadCipher, Vec<u8>), TlsError> {
-    let key_len = cipher_suite.key_length as usize; // 16 or 32 for GCM
-    let iv_len = cipher_suite.fixed_iv_length as usize; // 4 for GCM
-    // mac_key_length is 0 for AEAD ciphersuites, no need to account for it in offset
-    let expected_len = 2 * (key_len + iv_len); // client and server keys + ivs
+    let key_len = cipher_suite.key_length as usize;
+    let iv_len = cipher_suite.fixed_iv_length as usize;
+    let expected_len = 2 * (key_len + iv_len); // No MAC keys for AEAD
 
-    //ensure enough bytes
     if key_block.len() < expected_len {
         return Err(TlsError::KeyDerivationError(format!(
             "Key block too short. Expected {} bytes for AEAD, got {}",
@@ -351,16 +271,17 @@ pub fn derive_aead_keys(
         )));
     }
 
+    // Extract keys and IVs in order: client_key, server_key, client_iv, server_iv
     let mut offset = 0;
-    let client_key = &key_block[offset..offset + key_len]; // get the client key
+    let client_key = &key_block[offset..offset + key_len];
     offset += key_len;
-    let server_key = &key_block[offset..offset + key_len]; //get the server key
+    let server_key = &key_block[offset..offset + key_len];
     offset += key_len;
-    let client_iv = &key_block[offset..offset + iv_len]; // get the client iv
+    let client_iv = &key_block[offset..offset + iv_len];
     offset += iv_len;
-    let server_iv = &key_block[offset..offset + iv_len]; // get the server iv
+    let server_iv = &key_block[offset..offset + iv_len];
 
-    //choose the cipher based on the key length
+    // Create AEAD ciphers based on key length
     let (client_cipher, server_cipher) = match key_len {
         16 => (
             TlsAeadCipher::Aes128Gcm(AesGcm::<Aes128, U12, U16>::new(GenericArray::from_slice(
@@ -380,7 +301,7 @@ pub fn derive_aead_keys(
         ),
         _ => {
             return Err(TlsError::KeyDerivationError(format!(
-                "Unsupported key_len for AEAD: {}",
+                "Unsupported key length for AEAD: {} bytes",
                 key_len
             )));
         }
@@ -394,34 +315,119 @@ pub fn derive_aead_keys(
     ))
 }
 
-///Finished Verify Data
+/// Encrypts a TLS record using AES-GCM
+///
+/// Constructs the proper nonce and AAD according to TLS 1.2 specification,
+/// then performs AEAD encryption with authentication.
+pub fn encrypt_gcm_message(
+    plaintext: &[u8],
+    cipher: &TlsAeadCipher,
+    fixed_iv: &[u8],
+    sequence_number: u64,
+    content_type: TlsContentType,
+    tls_version: TlsVersion,
+) -> Result<Vec<u8>, TlsError> {
+    validate_fixed_iv(fixed_iv)?;
+
+    // Construct GCM nonce: fixed_iv (4 bytes) || sequence_number (8 bytes)
+    let nonce = build_gcm_nonce(fixed_iv, sequence_number);
+
+    // Build Additional Authenticated Data (AAD)
+    let aad = build_aad(sequence_number, content_type, tls_version, plaintext.len())?;
+
+    // Perform AEAD encryption
+    let ciphertext_with_tag = match cipher {
+        TlsAeadCipher::Aes128Gcm(cipher) => cipher.encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        ),
+        TlsAeadCipher::Aes256Gcm(cipher) => cipher.encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        ),
+    }
+    .map_err(|e| TlsError::EncryptionError(format!("AES-GCM encryption failed: {:?}", e)))?;
+
+    Ok(ciphertext_with_tag)
+}
+
+/// Decrypts a TLS 1.2 GCM message with explicit nonce
+///
+/// Handles the TLS 1.2 record format where the explicit nonce is prepended
+/// to the ciphertext within the record payload.
+pub fn decrypt_gcm_message_with_explicit_nonce(
+    ciphertext_with_tag: &[u8],
+    cipher: &TlsAeadCipher,
+    fixed_iv: &[u8],
+    explicit_nonce: &[u8],
+    sequence_number: u64,
+    content_type: TlsContentType,
+    tls_version: TlsVersion,
+) -> Result<Vec<u8>, TlsError> {
+    // Validate inputs
+    validate_ciphertext_length(ciphertext_with_tag)?;
+    validate_fixed_iv(fixed_iv)?;
+    validate_explicit_nonce(explicit_nonce)?;
+
+    // Construct full nonce: fixed_iv || explicit_nonce
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[..4].copy_from_slice(fixed_iv);
+    nonce_bytes[4..].copy_from_slice(explicit_nonce);
+    let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes);
+
+    // Calculate plaintext length (ciphertext - auth tag)
+    let plaintext_length = ciphertext_with_tag.len() - 16;
+
+    // Build AAD for verification
+    let aad = build_aad(sequence_number, content_type, tls_version, plaintext_length)?;
+
+    // Perform AEAD decryption
+    let plaintext = match cipher {
+        TlsAeadCipher::Aes128Gcm(cipher) => cipher.decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext_with_tag,
+                aad: &aad,
+            },
+        ),
+        TlsAeadCipher::Aes256Gcm(cipher) => cipher.decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext_with_tag,
+                aad: &aad,
+            },
+        ),
+    }
+    .map_err(|e| TlsError::EncryptionError(format!("AES-GCM decryption failed: {:?}", e)))?;
+
+    Ok(plaintext)
+}
+
+// ==============================================
+// FINISHED MESSAGE VERIFICATION
+
+/// Calculates TLS 1.2 Finished message verify_data
+///
+/// RFC 5246: verify_data = PRF(master_secret, finished_label, Hash(handshake_messages))[0..11]
 pub fn calculate_verify_data(
     master_secret: &[u8],
     handshake_messages: &[u8],
     label: &[u8],
     hash_algorithm: crate::services::tls_parser::HashAlgorithm,
 ) -> Result<Vec<u8>, TlsError> {
-    let handshake_hash = match hash_algorithm {
-        crate::services::tls_parser::HashAlgorithm::Sha256 => {
-            let mut hasher = Sha256::default();
-            hasher.update(handshake_messages);
-            hasher.finalize().to_vec()
-        }
-        crate::services::tls_parser::HashAlgorithm::Sha384 => {
-            let mut hasher = Sha384::default();
-            hasher.update(handshake_messages);
-            hasher.finalize().to_vec()
-        }
-    };
-
-    let mut seed = Vec::new();
-    seed.extend_from_slice(&handshake_hash);
+    let handshake_hash = compute_handshake_hash(handshake_messages, hash_algorithm);
 
     let mut verify_data = [0u8; 12];
     prf_tls12(
         master_secret,
         label,
-        &seed,
+        &handshake_hash,
         &mut verify_data,
         hash_algorithm,
     )
@@ -430,24 +436,17 @@ pub fn calculate_verify_data(
     Ok(verify_data.to_vec())
 }
 
-/// Like calculate_verify_data, but also returns the handshake_hash
+/// Calculates verify_data and returns both the data and the handshake hash
+///
+/// Useful when both the verify_data and handshake hash are needed separately.
 pub fn calculate_verify_data_with_hash(
     master_secret: &[u8],
     handshake_transcript: &[u8],
     label: &[u8],
     hash_algorithm: crate::services::tls_parser::HashAlgorithm,
 ) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
-    // Calculate handshake hash
-    let handshake_hash = match hash_algorithm {
-        crate::services::tls_parser::HashAlgorithm::Sha256 => {
-            Sha256::digest(handshake_transcript).to_vec()
-        }
-        crate::services::tls_parser::HashAlgorithm::Sha384 => {
-            Sha384::digest(handshake_transcript).to_vec()
-        }
-    };
+    let handshake_hash = compute_handshake_hash(handshake_transcript, hash_algorithm);
 
-    // Calculate verify_data using PRF
     let mut verify_data = [0u8; 12];
     prf_tls12(
         master_secret,
@@ -461,135 +460,31 @@ pub fn calculate_verify_data_with_hash(
     Ok((verify_data.to_vec(), handshake_hash))
 }
 
-// encrypt a tls record using aes-gcm in tls.12
-pub fn encrypt_gcm_message(
-    plaintext: &[u8], //the data to encrypt
-    key: &TlsAeadCipher,
-    fixed_iv: &[u8],      //4 byte initialisation vector
-    sequence_number: u64, //increases with each record
-    content_type: TlsContentType,
-    tls_record_version: TlsVersion,
-) -> Result<Vec<u8>, TlsError> {
-    // Validate fixed_iv length
-    if fixed_iv.len() != 4 {
-        return Err(TlsError::EncryptionError(format!(
-            "Invalid fixed_iv length for encryption. Expected: 4, got: {}",
-            fixed_iv.len()
-        )));
-    }
+// ============================================================================
+// KEY GENERATION UTILITIES
+// ============================================================================
 
-    //build the nonce (12 bytes for aes-gcm) combines the iv and sequence number
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..4].copy_from_slice(fixed_iv);
-    nonce_bytes[4..].copy_from_slice(&sequence_number.to_be_bytes());
+/// Generates a P-256 ECDH key pair for key exchange
+///
+/// Returns the public key in uncompressed point format (65 bytes) and the
+/// ephemeral secret for computing the shared secret.
+pub fn generate_p256_keyshare() -> ([u8; 65], p256::ecdh::EphemeralSecret) {
+    use p256::{EncodedPoint, ecdh::EphemeralSecret};
+    use rand::rngs::OsRng;
 
-    //building the additiona authenticated data (AAD)
-    let plaintext_length = plaintext.len();
-    let mut aad_bytes = Vec::with_capacity(13);
-    aad_bytes.extend_from_slice(&sequence_number.to_be_bytes());
-    aad_bytes.push(content_type.as_u8());
-    let (major, minor) = tls_record_version.to_u8_pair();
-    aad_bytes.push(major);
-    aad_bytes.push(minor);
-    aad_bytes.extend_from_slice(&(plaintext_length as u16).to_be_bytes());
+    let secret = EphemeralSecret::random(&mut OsRng);
+    let public_point = EncodedPoint::from(&secret.public_key());
+    let pub_bytes = public_point.to_bytes();
 
-    let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes);
+    let mut arr = [0u8; 65];
+    arr.copy_from_slice(&pub_bytes);
 
-    let ciphertext_with_tag = match key {
-        //encrypt the plaintext using the key and nonce
-        TlsAeadCipher::Aes128Gcm(cipher) => cipher.encrypt(
-            nonce,
-            Payload {
-                msg: plaintext,
-                aad: &aad_bytes,
-            },
-        ),
-        TlsAeadCipher::Aes256Gcm(cipher) => cipher.encrypt(
-            nonce,
-            Payload {
-                msg: plaintext,
-                aad: &aad_bytes,
-            },
-        ),
-    }
-    .map_err(|e| TlsError::EncryptionError(format!("AES-GCM encryption failed: {:?}", e)))?;
-
-    Ok(ciphertext_with_tag)
+    (arr, secret)
 }
 
-/// Decrypts a TLS 1.2 GCM message payload with explicit nonce.
-pub fn decrypt_gcm_message_with_explicit_nonce(
-    ciphertext_with_tag: &[u8],
-    key: &TlsAeadCipher,
-    fixed_iv: &[u8],
-    explicit_nonce: &[u8],
-    sequence_number: u64,
-    content_type: TlsContentType,
-    tls_version: TlsVersion,
-) -> Result<Vec<u8>, TlsError> {
-    // Validate ciphertext length
-    if ciphertext_with_tag.len() < 16 {
-        return Err(TlsError::EncryptionError(format!(
-            "Ciphertext too short for GCM tag. Length: {}, minimum: 16",
-            ciphertext_with_tag.len()
-        )));
-    }
-
-    // Validate fixed_iv length
-    if fixed_iv.len() != 4 {
-        return Err(TlsError::EncryptionError(format!(
-            "Invalid fixed_iv length for decryption. Expected: 4, got: {}",
-            fixed_iv.len()
-        )));
-    }
-
-    // Validate explicit_nonce length
-    if explicit_nonce.len() != 8 {
-        return Err(TlsError::EncryptionError(format!(
-            "Invalid explicit_nonce length for decryption. Expected: 8, got: {}",
-            explicit_nonce.len()
-        )));
-    }
-
-    // Construct nonce as fixed_iv || explicit_nonce (4 + 8 = 12 bytes)
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..4].copy_from_slice(fixed_iv);
-    nonce_bytes[4..].copy_from_slice(explicit_nonce);
-
-    let plaintext_length = ciphertext_with_tag.len() - 16;
-
-    let mut aad_bytes = Vec::with_capacity(13);
-    aad_bytes.extend_from_slice(&sequence_number.to_be_bytes());
-    aad_bytes.push(content_type.as_u8());
-    let (major, minor) = tls_version.to_u8_pair();
-    aad_bytes.push(major);
-    aad_bytes.push(minor);
-    aad_bytes.extend_from_slice(&(plaintext_length as u16).to_be_bytes());
-
-    let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes);
-
-    let plaintext = match key {
-        TlsAeadCipher::Aes128Gcm(cipher) => cipher.decrypt(
-            nonce,
-            Payload {
-                msg: ciphertext_with_tag,
-                aad: &aad_bytes,
-            },
-        ),
-        TlsAeadCipher::Aes256Gcm(cipher) => cipher.decrypt(
-            nonce,
-            Payload {
-                msg: ciphertext_with_tag,
-                aad: &aad_bytes,
-            },
-        ),
-    }
-    .map_err(|e| TlsError::EncryptionError(format!("AES-GCM decryption failed: {:?}", e)))?;
-
-    Ok(plaintext)
-}
-
-/// HKDF (Optional TLS 1.3)
+/// Generic HKDF key derivation (optional utility)
+///
+/// Provides a general-purpose HKDF interface for custom key derivation needs.
 #[allow(dead_code)]
 pub fn derive_hkdf_keys(
     shared_secret: &[u8],
@@ -597,6 +492,180 @@ pub fn derive_hkdf_keys(
     info: &[u8],
     output_len: usize,
 ) -> Result<Vec<u8>, TlsError> {
+    let salt = Salt::new(HKDF_SHA256, salt.unwrap_or(&[]));
+    let prk = salt.extract(shared_secret);
+
+    expand_with_info(&prk, info, output_len)
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// P_hash function for TLS 1.2 PRF with dynamic hash selection
+fn tls12_prf_p_hash(
+    hash_algorithm: crate::services::tls_parser::HashAlgorithm,
+    secret: &[u8],
+    seed: &[u8],
+    output: &mut [u8],
+) -> Result<(), String> {
+    match hash_algorithm {
+        crate::services::tls_parser::HashAlgorithm::Sha256 => {
+            tls12_prf_p_hash_sha256(secret, seed, output)
+        }
+        crate::services::tls_parser::HashAlgorithm::Sha384 => {
+            tls12_prf_p_hash_sha384(secret, seed, output)
+        }
+    }
+}
+
+/// P_hash implementation using SHA-256
+///
+/// RFC 5246: P_hash(secret, seed) = HMAC_hash(secret, A(1) + seed) +
+///                                  HMAC_hash(secret, A(2) + seed) + ...
+/// where A(0) = seed, A(i) = HMAC_hash(secret, A(i-1))
+fn tls12_prf_p_hash_sha256(secret: &[u8], seed: &[u8], output: &mut [u8]) -> Result<(), String> {
+    let mut a_i = seed.to_vec();
+    let mut current_output_len = 0;
+
+    while current_output_len < output.len() {
+        // Calculate A(i) = HMAC(secret, A(i-1)) - Fix: use Mac::new_from_slice explicitly
+        let mut mac_a = <Hmac<Sha256> as Mac>::new_from_slice(secret)
+            .map_err(|_| "HMAC key error for A(i)".to_string())?;
+        mac_a.update(&a_i);
+        a_i = mac_a.finalize().into_bytes().to_vec();
+
+        // Calculate P_hash output block = HMAC(secret, A(i) + seed) - Fix: use Mac::new_from_slice explicitly
+        let mut mac_p = <Hmac<Sha256> as Mac>::new_from_slice(secret)
+            .map_err(|_| "HMAC key error for P_hash".to_string())?;
+        mac_p.update(&a_i);
+        mac_p.update(seed);
+        let hmac_result = mac_p.finalize().into_bytes();
+
+        // Copy as much as needed to fill the output
+        let to_copy = std::cmp::min(hmac_result.len(), output.len() - current_output_len);
+        output[current_output_len..current_output_len + to_copy]
+            .copy_from_slice(&hmac_result[..to_copy]);
+
+        current_output_len += to_copy;
+    }
+
+    Ok(())
+}
+
+/// P_hash implementation using SHA-384
+fn tls12_prf_p_hash_sha384(secret: &[u8], seed: &[u8], output: &mut [u8]) -> Result<(), String> {
+    let mut a_i = seed.to_vec();
+    let mut current_output_len = 0;
+
+    while current_output_len < output.len() {
+        // Calculate A(i) = HMAC(secret, A(i-1)) - Fix: use Mac::new_from_slice explicitly
+        let mut mac_a = <Hmac<Sha384> as Mac>::new_from_slice(secret)
+            .map_err(|_| "HMAC key error for A(i)".to_string())?;
+        mac_a.update(&a_i);
+        a_i = mac_a.finalize().into_bytes().to_vec();
+
+        // Calculate P_hash output block = HMAC(secret, A(i) + seed) - Fix: use Mac::new_from_slice explicitly
+        let mut mac_p = <Hmac<Sha384> as Mac>::new_from_slice(secret)
+            .map_err(|_| "HMAC key error for P_hash".to_string())?;
+        mac_p.update(&a_i);
+        mac_p.update(seed);
+        let hmac_result = mac_p.finalize().into_bytes();
+
+        // Copy as much as needed to fill the output
+        let to_copy = std::cmp::min(hmac_result.len(), output.len() - current_output_len);
+        output[current_output_len..current_output_len + to_copy]
+            .copy_from_slice(&hmac_result[..to_copy]);
+
+        current_output_len += to_copy;
+    }
+
+    Ok(())
+}
+
+/// Builds the HKDFLabel structure for TLS 1.3
+///
+/// RFC 8446: struct {
+///     uint16 length = Length;
+///     opaque label<7..255> = "tls13 " + Label;
+///     opaque context<0..255> = Context;
+/// } HKDFLabel;
+fn build_hkdf_label(length: u16, label: &[u8], context: &[u8]) -> Vec<u8> {
+    let mut hkdf_label = Vec::with_capacity(2 + 1 + label.len() + 1 + context.len());
+
+    // Length (2 bytes, big-endian)
+    hkdf_label.extend_from_slice(&length.to_be_bytes());
+
+    // Label length and label
+    hkdf_label.push(label.len() as u8);
+    hkdf_label.extend_from_slice(label);
+
+    // Context length and context
+    hkdf_label.push(context.len() as u8);
+    hkdf_label.extend_from_slice(context);
+
+    hkdf_label
+}
+
+/// Computes empty hash for TLS 1.3 key derivation
+fn compute_empty_hash(use_sha384: bool) -> Vec<u8> {
+    if use_sha384 {
+        Sha384::digest(&[]).to_vec()
+    } else {
+        Sha256::digest(&[]).to_vec()
+    }
+}
+
+/// Computes handshake hash for TLS 1.2 finished messages
+fn compute_handshake_hash(
+    handshake_messages: &[u8],
+    hash_algorithm: crate::services::tls_parser::HashAlgorithm,
+) -> Vec<u8> {
+    match hash_algorithm {
+        crate::services::tls_parser::HashAlgorithm::Sha256 => {
+            Sha256::digest(handshake_messages).to_vec()
+        }
+        crate::services::tls_parser::HashAlgorithm::Sha384 => {
+            Sha384::digest(handshake_messages).to_vec()
+        }
+    }
+}
+
+/// Builds GCM nonce from fixed IV and sequence number
+fn build_gcm_nonce(fixed_iv: &[u8], sequence_number: u64) -> GenericArray<u8, U12> {
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[..4].copy_from_slice(fixed_iv);
+    nonce_bytes[4..].copy_from_slice(&sequence_number.to_be_bytes());
+    *GenericArray::<u8, U12>::from_slice(&nonce_bytes)
+}
+
+/// Builds Additional Authenticated Data (AAD) for GCM
+fn build_aad(
+    sequence_number: u64,
+    content_type: TlsContentType,
+    tls_version: TlsVersion,
+    plaintext_length: usize,
+) -> Result<Vec<u8>, TlsError> {
+    if plaintext_length > u16::MAX as usize {
+        return Err(TlsError::EncryptionError(format!(
+            "Plaintext length {} exceeds maximum for TLS record",
+            plaintext_length
+        )));
+    }
+
+    let mut aad = Vec::with_capacity(13);
+    aad.extend_from_slice(&sequence_number.to_be_bytes());
+    aad.push(content_type.as_u8());
+    let (major, minor) = tls_version.to_u8_pair();
+    aad.push(major);
+    aad.push(minor);
+    aad.extend_from_slice(&(plaintext_length as u16).to_be_bytes());
+
+    Ok(aad)
+}
+
+/// Expands a PRK using provided info parameter
+fn expand_with_info(prk: &Prk, info: &[u8], length: usize) -> Result<Vec<u8>, TlsError> {
     struct OkmLen(usize);
     impl KeyType for OkmLen {
         fn len(&self) -> usize {
@@ -604,33 +673,50 @@ pub fn derive_hkdf_keys(
         }
     }
 
-    let salt = Salt::new(HKDF_SHA256, salt.unwrap_or(&[]));
-    let prk: Prk = salt.extract(shared_secret);
-
     let info_ref = [info];
-
     let okm = prk
-        .expand(&info_ref, OkmLen(output_len))
+        .expand(&info_ref, OkmLen(length))
         .map_err(|_| TlsError::KeyDerivationError("HKDF expand error".into()))?;
 
-    let mut output = vec![0u8; output_len];
+    let mut output = vec![0u8; length];
     okm.fill(&mut output)
         .map_err(|_| TlsError::KeyDerivationError("HKDF fill error".into()))?;
 
     Ok(output)
 }
 
-// X25519 keypair generation removed
+// ===================================================
+// VALIDATION HELPERS
 
-// P-256 keypair generation
-pub fn generate_p256_keyshare() -> ([u8; 65], p256::ecdh::EphemeralSecret) {
-    use p256::EncodedPoint;
-    use p256::ecdh::EphemeralSecret;
-    use rand::rngs::OsRng;
-    let secret = EphemeralSecret::random(&mut OsRng);
-    let public_point = EncodedPoint::from(&secret.public_key());
-    let pub_bytes = public_point.to_bytes();
-    let mut arr = [0u8; 65];
-    arr.copy_from_slice(&pub_bytes);
-    (arr, secret)
+/// Validates fixed IV length for GCM operations
+fn validate_fixed_iv(fixed_iv: &[u8]) -> Result<(), TlsError> {
+    if fixed_iv.len() != 4 {
+        return Err(TlsError::EncryptionError(format!(
+            "Invalid fixed_iv length. Expected: 4, got: {}",
+            fixed_iv.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Validates explicit nonce length for GCM operations
+fn validate_explicit_nonce(explicit_nonce: &[u8]) -> Result<(), TlsError> {
+    if explicit_nonce.len() != 8 {
+        return Err(TlsError::EncryptionError(format!(
+            "Invalid explicit_nonce length. Expected: 8, got: {}",
+            explicit_nonce.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Validates ciphertext length for GCM operations
+fn validate_ciphertext_length(ciphertext: &[u8]) -> Result<(), TlsError> {
+    if ciphertext.len() < 16 {
+        return Err(TlsError::EncryptionError(format!(
+            "Ciphertext too short for GCM tag. Length: {}, minimum: 16",
+            ciphertext.len()
+        )));
+    }
+    Ok(())
 }

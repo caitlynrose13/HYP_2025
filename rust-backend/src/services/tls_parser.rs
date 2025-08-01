@@ -1,8 +1,13 @@
+//! TLS Protocol Parser and Analysis Module
+//!
+//! This module provides comprehensive parsing capabilities for TLS 1.2 and TLS 1.3 protocols.
+//! It handles TLS records, handshake messages, extensions, cipher suites, and alert messages.
+
 use super::errors::TlsError;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::{Cursor, Read};
 
-// TLS Versions
+// TLS Protocol Versions
 pub const TLS_1_2_MAJOR: u8 = 0x03;
 pub const TLS_1_2_MINOR: u8 = 0x03;
 
@@ -16,23 +21,20 @@ pub const TLS_ALERT_HANDSHAKE_FAILURE: u8 = 0x28;
 pub const TLS_ALERT_PROTOCOL_VERSION: u8 = 0x46;
 pub const TLS_ALERT_INTERNAL_ERROR: u8 = 0x50;
 
-// Extension Types
+// TLS Extension Types
 pub const EXTENSION_TYPE_SERVER_NAME: u16 = 0x0000;
 pub const EXTENSION_TYPE_SUPPORTED_GROUPS: u16 = 0x000A;
 pub const EXTENSION_TYPE_SIGNATURE_ALGORITHMS: u16 = 0x000D;
 pub const EXTENSION_TYPE_SUPPORTED_VERSIONS: u16 = 0x002B;
 pub const EXTENSION_TYPE_KEY_SHARE: u16 = 0x0033;
 
-// SNI
+// Server Name Indication (SNI)
 pub const SNI_HOSTNAME_TYPE: u8 = 0x00;
 
 // Signature Algorithms
 pub const SIG_ALG_ECDSA_SECP256R1_SHA256: [u8; 2] = [0x04, 0x03];
 pub const SIG_ALG_RSA_PSS_RSAE_SHA256: [u8; 2] = [0x08, 0x04];
 pub const SIG_ALG_RSA_PKCS1_SHA256: [u8; 2] = [0x04, 0x01];
-
-// ================
-// ERROR TYPES
 
 #[derive(Debug)]
 pub enum TlsParserError {
@@ -42,24 +44,26 @@ pub enum TlsParserError {
     InvalidLength,
     InvalidVersion(u8, u8),
     InvalidCipherSuite([u8; 2]),
+    InvalidSignatureScheme(u16),
+    InvalidNamedGroup(u16),
     MalformedClientHello,
     MalformedServerHello,
     MalformedCertificateList,
-    MalformedMessage(String),
     MalformedServerKeyExchange,
-    InvalidSignatureScheme(u16),
-    InvalidNamedGroup(u16),
+    MalformedMessage(String),
     GenericError(String),
 }
 
 impl std::fmt::Display for TlsParserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TlsParserError::Incomplete { expected, actual } => write!(
-                f,
-                "Incomplete data: expected {} bytes, got {}",
-                expected, actual
-            ),
+            TlsParserError::Incomplete { expected, actual } => {
+                write!(
+                    f,
+                    "Incomplete data: expected {} bytes, got {}",
+                    expected, actual
+                )
+            }
             TlsParserError::InvalidHandshakeType(h_type) => {
                 write!(f, "Invalid handshake type: 0x{:02X}", h_type)
             }
@@ -73,28 +77,28 @@ impl std::fmt::Display for TlsParserError {
             TlsParserError::InvalidCipherSuite(cs) => {
                 write!(f, "Invalid cipher suite: 0x{:02X}{:02X}", cs[0], cs[1])
             }
-            TlsParserError::MalformedClientHello => write!(f, "Malformed ClientHello message"),
-            TlsParserError::MalformedServerHello => write!(f, "Malformed ServerHello message"),
-            TlsParserError::MalformedCertificateList => write!(f, "Malformed Certificate list"),
-            TlsParserError::MalformedServerKeyExchange => {
-                write!(f, "Malformed ServerKeyExchange message")
-            }
             TlsParserError::InvalidSignatureScheme(scheme) => {
                 write!(f, "Invalid signature scheme: 0x{:04X}", scheme)
             }
             TlsParserError::InvalidNamedGroup(group) => {
                 write!(f, "Invalid named group: 0x{:04X}", group)
             }
-            TlsParserError::GenericError(s) => write!(f, "Parser error: {}", s),
+            TlsParserError::MalformedClientHello => write!(f, "Malformed ClientHello message"),
+            TlsParserError::MalformedServerHello => write!(f, "Malformed ServerHello message"),
+            TlsParserError::MalformedCertificateList => write!(f, "Malformed Certificate list"),
+            TlsParserError::MalformedServerKeyExchange => {
+                write!(f, "Malformed ServerKeyExchange message")
+            }
             TlsParserError::MalformedMessage(msg) => write!(f, "Malformed message: {}", msg),
+            TlsParserError::GenericError(s) => write!(f, "Parser error: {}", s),
         }
     }
 }
 
 impl std::error::Error for TlsParserError {}
 
-// ==========================================
-// CORE TLS TYPES
+// ==========
+// CORE TLS ENUMS
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -123,9 +127,8 @@ impl TlsContentType {
 
 impl From<u8> for TlsContentType {
     fn from(value: u8) -> Self {
-        TlsContentType::try_from_u8(value).unwrap_or_else(|| {
-            panic!("Invalid TlsContentType value: 0x{:02X}", value);
-        })
+        TlsContentType::try_from_u8(value)
+            .unwrap_or_else(|| panic!("Invalid TlsContentType value: 0x{:02X}", value))
     }
 }
 
@@ -178,9 +181,8 @@ impl HandshakeMessageType {
 
 impl From<u8> for HandshakeMessageType {
     fn from(value: u8) -> Self {
-        HandshakeMessageType::try_from_u8(value).unwrap_or_else(|| {
-            panic!("Invalid HandshakeMessageType value: 0x{:02X}", value);
-        })
+        HandshakeMessageType::try_from_u8(value)
+            .unwrap_or_else(|| panic!("Invalid HandshakeMessageType value: 0x{:02X}", value))
     }
 }
 
@@ -216,11 +218,10 @@ impl TlsVersion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
 pub enum NamedGroup {
-    P256 = 0x0017,
-    P384 = 0x0018,
-    X25519 = 0x001D,
+    P256,
+    P384,
+    X25519,
     Unknown(u16),
 }
 
@@ -239,7 +240,7 @@ impl NamedGroup {
             0x0017 => Some(NamedGroup::P256),
             0x0018 => Some(NamedGroup::P384),
             0x001D => Some(NamedGroup::X25519),
-            _ => None,
+            _ => Some(NamedGroup::Unknown(value)),
         }
     }
 }
@@ -250,7 +251,7 @@ pub enum HashAlgorithm {
     Sha384,
 }
 
-// =========================================
+// ==========================================
 // TLS STRUCTURES
 
 #[derive(Debug)]
@@ -340,8 +341,9 @@ impl TlsAlert {
     }
 }
 
-// =====================================
+// =============================================================================
 // PARSED MESSAGE STRUCTURES
+// =============================================================================
 
 #[derive(Debug, Clone)]
 pub struct ServerHelloParsed {
@@ -374,6 +376,9 @@ pub struct ServerKeyExchangeParsed {
     pub params_raw: Vec<u8>,
 }
 
+// =============================================
+// CIPHER SUITE DEFINITIONS
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CipherSuite {
     pub id: [u8; 2],
@@ -384,49 +389,11 @@ pub struct CipherSuite {
     pub hash_algorithm: HashAlgorithm,
 }
 
-// Cipher Suite IDs
-pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite {
-    id: [0xc0, 0x2f],
-    name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-    key_length: 16,
-    fixed_iv_length: 4,
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha256,
-};
-
-pub const TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: CipherSuite = CipherSuite {
-    id: [0xc0, 0x30],
-    name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-    key_length: 32,
-    fixed_iv_length: 4,
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha384,
-};
-
-pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
-    id: [0xCC, 0xA8],
-    name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-    key_length: 32,
-    fixed_iv_length: 4, // ← Add this missing field
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha256, // ← Use local HashAlgorithm
-};
-
-pub const TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
-    id: [0xCC, 0xA9],
-    name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
-    key_length: 32,
-    fixed_iv_length: 4, // ← Add this missing field
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha256, // ← Use local HashAlgorithm
-};
-
 impl CipherSuite {
     pub const fn new(id0: u8, id1: u8) -> Self {
         let id = [id0, id1];
-
-        // Match the cipher suite ID and return the appropriate CipherSuite
         match id {
+            // TLS 1.3 Cipher Suites
             [0x13, 0x01] => CipherSuite {
                 id,
                 name: "TLS_AES_128_GCM_SHA256",
@@ -451,6 +418,7 @@ impl CipherSuite {
                 mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha256,
             },
+            // TLS 1.2 ECDHE Cipher Suites
             [0xc0, 0x2f] => CipherSuite {
                 id,
                 name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -467,7 +435,7 @@ impl CipherSuite {
                 mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha384,
             },
-            // Default case for unknown cipher suites
+            // Default for unknown cipher suites
             _ => CipherSuite {
                 id: [0x00, 0x00],
                 name: "UNKNOWN",
@@ -480,9 +448,29 @@ impl CipherSuite {
     }
 }
 
-// ============================================================================
-// CIPHER SUITE FUNCTIONS
-// ============================================================================
+// Predefined Cipher Suite Constants
+pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite::new(0xc0, 0x2f);
+pub const TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: CipherSuite = CipherSuite::new(0xc0, 0x30);
+pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
+    id: [0xCC, 0xA8],
+    name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+    key_length: 32,
+    fixed_iv_length: 4,
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha256,
+};
+pub const TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
+    id: [0xCC, 0xA9],
+    name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+    key_length: 32,
+    fixed_iv_length: 4,
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha256,
+};
+
+// =============================================================================
+// CIPHER SUITE UTILITY FUNCTIONS
+// =============================================================================
 
 pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
     match suite {
@@ -493,7 +481,7 @@ pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
         [0x13, 0x04] => "TLS_AES_128_CCM_SHA256".to_string(),
         [0x13, 0x05] => "TLS_AES_128_CCM_8_SHA256".to_string(),
 
-        // TLS 1.2 ECDHE GCM cipher suites (modern, A+ grade)
+        // TLS 1.2 ECDHE GCM cipher suites
         [0xc0, 0x2f] => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         [0xc0, 0x30] => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         [0xc0, 0x2b] => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_string(),
@@ -501,7 +489,7 @@ pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
         [0xcc, 0xa8] => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
         [0xcc, 0xa9] => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
 
-        // TLS 1.2 ECDHE CBC cipher suites (good, A grade)
+        // TLS 1.2 ECDHE CBC cipher suites
         [0xc0, 0x27] => "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256".to_string(),
         [0xc0, 0x28] => "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384".to_string(),
         [0xc0, 0x23] => "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256".to_string(),
@@ -511,7 +499,7 @@ pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
         [0xc0, 0x09] => "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA".to_string(),
         [0xc0, 0x0a] => "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA".to_string(),
 
-        // DHE cipher suites (B grade - PFS but slower)
+        // DHE cipher suites
         [0x00, 0x9e] => "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         [0x00, 0x9f] => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         [0x00, 0x67] => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256".to_string(),
@@ -519,7 +507,7 @@ pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
         [0x00, 0x33] => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA".to_string(),
         [0x00, 0x39] => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA".to_string(),
 
-        // RSA cipher suites (C/D grade - no PFS)
+        // RSA cipher suites
         [0x00, 0x9c] => "TLS_RSA_WITH_AES_128_GCM_SHA256".to_string(),
         [0x00, 0x9d] => "TLS_RSA_WITH_AES_256_GCM_SHA384".to_string(),
         [0x00, 0x3c] => "TLS_RSA_WITH_AES_128_CBC_SHA256".to_string(),
@@ -527,7 +515,7 @@ pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
         [0x00, 0x2f] => "TLS_RSA_WITH_AES_128_CBC_SHA".to_string(),
         [0x00, 0x35] => "TLS_RSA_WITH_AES_256_CBC_SHA".to_string(),
 
-        // Fallback for unknown cipher suites
+        // Unknown cipher suites
         _ => format!("Unknown ({:02x}{:02x})", suite[0], suite[1]),
     }
 }
@@ -535,88 +523,19 @@ pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
 pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<CipherSuite> {
     match *id {
         // TLS 1.3 cipher suites
-        [0x13, 0x01] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_AES_128_GCM_SHA256",
-            key_length: 16,
-            fixed_iv_length: 12,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha256,
-        }),
-        [0x13, 0x02] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_AES_256_GCM_SHA384",
-            key_length: 32,
-            fixed_iv_length: 12,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha384,
-        }),
-        [0x13, 0x03] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_CHACHA20_POLY1305_SHA256",
-            key_length: 32,
-            fixed_iv_length: 12,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha256,
-        }),
-
+        [0x13, 0x01] | [0x13, 0x02] | [0x13, 0x03] => Some(CipherSuite::new(id[0], id[1])),
         // TLS 1.2 ECDHE cipher suites
-        [0xc0, 0x2f] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-            key_length: 16,
-            fixed_iv_length: 4,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha256,
-        }),
-        [0xc0, 0x30] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-            key_length: 32,
-            fixed_iv_length: 4,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha384,
-        }),
-        [0xc0, 0x2b] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-            key_length: 16,
-            fixed_iv_length: 4,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha256,
-        }),
-        [0xc0, 0x2c] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-            key_length: 32,
-            fixed_iv_length: 4,
-            mac_key_length: 0,
-            hash_algorithm: HashAlgorithm::Sha384,
-        }),
-        [0xcc, 0xa8] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-            key_length: 32,
-            fixed_iv_length: 4, // ← Add this missing field
-            mac_key_length: 0,  // ChaCha20-Poly1305 is AEAD, no separate MAC
-            hash_algorithm: HashAlgorithm::Sha256,
-        }),
-        [0xcc, 0xa9] => Some(CipherSuite {
-            id: *id,
-            name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
-            key_length: 32,
-            fixed_iv_length: 4, // ← Add this missing field
-            mac_key_length: 0,  // ChaCha20-Poly1305 is AEAD, no separate MAC
-            hash_algorithm: HashAlgorithm::Sha256,
-        }),
-        // Add more as needed...
+        [0xc0, 0x2f] | [0xc0, 0x30] | [0xc0, 0x2b] | [0xc0, 0x2c] => {
+            Some(CipherSuite::new(id[0], id[1]))
+        }
+        [0xcc, 0xa8] => Some(TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256),
+        [0xcc, 0xa9] => Some(TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256),
         _ => None,
     }
 }
 
-// ============================================================================
+// ============================================
 // SIGNATURE ALGORITHM FUNCTIONS
-// ============================================================================
 
 pub fn parse_signature_algorithm(sig_alg: &[u8; 2]) -> Result<String, TlsError> {
     match sig_alg {
@@ -637,13 +556,15 @@ pub fn parse_signature_algorithm(sig_alg: &[u8; 2]) -> Result<String, TlsError> 
     }
 }
 
-// =============
-// PARSING
+// ========================
+// PARSING FUNCTIONS
 
+/// Parse a TLS record from the given reader
 pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>, TlsError> {
     let current_pos = reader.position() as usize;
     let remaining_len = reader.get_ref().len() - current_pos;
 
+    // Check if we have enough bytes for the TLS record header
     if remaining_len < 5 {
         return Ok(None);
     }
@@ -653,6 +574,7 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     let version_minor = reader.read_u8()?;
     let length = reader.read_u16::<BigEndian>()?;
 
+    // Check if we have enough bytes for the complete record
     if remaining_len < 5 + length as usize {
         reader.set_position(current_pos as u64);
         return Ok(None);
@@ -672,6 +594,7 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     }))
 }
 
+/// Parse handshake messages from the given data
 pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>, TlsError> {
     let mut cursor = Cursor::new(data);
     let mut messages = Vec::new();
@@ -679,6 +602,7 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
     while (cursor.position() as usize) < data.len() {
         let start_pos = cursor.position() as usize;
 
+        // Check for minimum handshake message header size
         if data.len() - start_pos < 4 {
             return Err(TlsError::ParserError(TlsParserError::Incomplete {
                 expected: 4,
@@ -689,10 +613,7 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
         let msg_type_byte = cursor.read_u8()?;
 
         // Handle TLS 1.3 encrypted handshake messages
-        // After ServerHello (0x02), subsequent messages are encrypted
-        if msg_type_byte > 0x18 || (msg_type_byte == 0x07) || (msg_type_byte == 0x70) {
-            // This looks like encrypted data, not a valid handshake message
-            // In TLS 1.3, we can't parse encrypted handshake messages without decryption
+        if msg_type_byte > 0x18 || msg_type_byte == 0x07 || msg_type_byte == 0x70 {
             println!(
                 "[DEBUG] Encountered encrypted handshake data (type: 0x{:02X}), stopping parsing",
                 msg_type_byte
@@ -704,9 +625,9 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
             TlsError::ParserError(TlsParserError::InvalidHandshakeType(msg_type_byte)),
         )?;
 
-        let length = cursor.read_u24::<BigEndian>()?;
+        let length = ReadBytesExt::read_u24::<BigEndian>(&mut cursor)?;
 
-        // Sanity check for unreasonably large lengths (likely encrypted data)
+        // Sanity check for unreasonably large lengths
         if length > 65536 {
             println!(
                 "[DEBUG] Unreasonably large handshake message length: {}, likely encrypted data",
@@ -715,6 +636,7 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
             break;
         }
 
+        // Check if we have enough data for the complete message
         if (cursor.position() as usize) + length as usize > data.len() {
             return Err(TlsError::ParserError(TlsParserError::Incomplete {
                 expected: length as usize,
@@ -726,18 +648,20 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
         cursor.read_exact(&mut payload)?;
 
         let end_pos = cursor.position() as usize;
-        let raw_bytes_for_this_message = data[start_pos..end_pos].to_vec();
+        let raw_bytes = data[start_pos..end_pos].to_vec();
 
         messages.push(TlsHandshakeMessage {
             msg_type,
             length,
             payload,
-            raw_bytes: raw_bytes_for_this_message,
+            raw_bytes,
         });
     }
+
     Ok(messages)
 }
 
+/// Parse a TLS extension from the given cursor
 pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsParserError> {
     let initial_pos = cursor.position() as usize;
     let remaining_bytes = cursor.get_ref().len() - initial_pos;
@@ -749,13 +673,8 @@ pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsP
         });
     }
 
-    let ext_type_bytes = &cursor.get_ref()[initial_pos..initial_pos + 2];
-    let ext_type = u16::from_be_bytes([ext_type_bytes[0], ext_type_bytes[1]]);
-    cursor.set_position((initial_pos + 2) as u64);
-
-    let ext_len_bytes = &cursor.get_ref()[initial_pos + 2..initial_pos + 4];
-    let ext_len = u16::from_be_bytes([ext_len_bytes[0], ext_len_bytes[1]]) as usize;
-    cursor.set_position((initial_pos + 4) as u64);
+    let ext_type = cursor.read_u16::<BigEndian>()?;
+    let ext_len = cursor.read_u16::<BigEndian>()? as usize;
 
     if remaining_bytes < 4 + ext_len {
         return Err(TlsParserError::Incomplete {
@@ -764,82 +683,58 @@ pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsP
         });
     }
 
-    let mut payload_bytes = vec![0u8; ext_len];
-    cursor
-        .read_exact(&mut payload_bytes)
-        .map_err(|_| TlsParserError::InvalidLength)?;
+    let mut payload = vec![0u8; ext_len];
+    cursor.read_exact(&mut payload)?;
 
     Ok(Extension {
         extension_type: ext_type,
-        payload: payload_bytes,
+        payload,
     })
 }
 
+/// Parse ServerHello message content
 pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, TlsParserError> {
     let mut cursor = Cursor::new(payload);
 
-    // Version (2 bytes)
+    // Parse version (2 bytes)
     if payload.len() < 2 {
         return Err(TlsParserError::MalformedServerHello);
     }
-    let negotiated_tls_version = (cursor.get_ref()[0], cursor.get_ref()[1]);
-    cursor.set_position(2);
+    let negotiated_tls_version = (cursor.read_u8()?, cursor.read_u8()?);
 
-    // Server random (32 bytes)
+    // Parse server random (32 bytes)
     if payload.len() < 34 {
         return Err(TlsParserError::MalformedServerHello);
     }
     let mut server_random = [0u8; 32];
-    server_random.copy_from_slice(&cursor.get_ref()[2..34]);
-    cursor.set_position(34);
+    cursor.read_exact(&mut server_random)?;
 
-    // Session ID
-    if cursor.position() as usize >= payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
-    let session_id_len = cursor.get_ref()[cursor.position() as usize] as usize;
-    cursor.set_position(cursor.position() + 1);
-
-    if cursor.position() as usize + session_id_len > payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
+    // Parse session ID
+    let session_id_len = cursor.read_u8()? as usize;
     cursor.set_position(cursor.position() + session_id_len as u64);
 
-    // Cipher suite (2 bytes)
-    if cursor.position() as usize + 2 > payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
-    let chosen_cipher_suite = [
-        cursor.get_ref()[cursor.position() as usize],
-        cursor.get_ref()[cursor.position() as usize + 1],
-    ];
-    cursor.set_position(cursor.position() + 2);
+    // Parse cipher suite (2 bytes)
+    let mut chosen_cipher_suite = [0u8; 2];
+    cursor.read_exact(&mut chosen_cipher_suite)?;
 
-    // Compression method (1 byte)
-    if cursor.position() as usize >= payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
-    cursor.set_position(cursor.position() + 1);
+    // Skip compression method (1 byte)
+    cursor.read_u8()?;
 
-    // Extensions (optional)
+    // Parse extensions (optional)
     let mut server_key_share_public = None;
     if cursor.position() as usize + 2 <= payload.len() {
-        let extensions_len = (cursor.get_ref()[cursor.position() as usize] as usize) << 8
-            | (cursor.get_ref()[cursor.position() as usize + 1] as usize);
-        cursor.set_position(cursor.position() + 2);
+        let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
 
         if cursor.position() as usize + extensions_len <= payload.len() {
             let extensions_start = cursor.position() as usize;
-            let extensions_data =
-                &cursor.get_ref()[extensions_start..extensions_start + extensions_len];
+            let extensions_data = &payload[extensions_start..extensions_start + extensions_len];
             let mut ext_cursor = Cursor::new(extensions_data);
 
-            while (ext_cursor.position() as usize) + 4 <= extensions_len {
-                let ext_type = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]);
-                let ext_len =
-                    u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]) as usize;
+            while ext_cursor.position() as usize + 4 <= extensions_len {
+                let ext_type = ext_cursor.read_u16::<BigEndian>()?;
+                let ext_len = ext_cursor.read_u16::<BigEndian>()? as usize;
 
-                if (ext_cursor.position() as usize) + ext_len > extensions_len {
+                if ext_cursor.position() as usize + ext_len > extensions_len {
                     break;
                 }
 
@@ -847,11 +742,10 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
                 ext_cursor.read_exact(&mut ext_data)?;
 
                 // Parse Key Share extension (0x0033)
-                if ext_type == 0x0033 && ext_len >= 4 {
+                if ext_type == EXTENSION_TYPE_KEY_SHARE && ext_len >= 4 {
                     let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
                     if ext_len >= 4 + key_len {
-                        let key = &ext_data[4..4 + key_len];
-                        server_key_share_public = Some(key.to_vec());
+                        server_key_share_public = Some(ext_data[4..4 + key_len].to_vec());
                     }
                 }
             }
@@ -866,160 +760,49 @@ pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, T
     })
 }
 
-pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserError> {
-    let mut cursor = Cursor::new(payload);
-
-    if payload.len() < 3 {
-        return Err(TlsParserError::MalformedCertificateList);
-    }
-
-    let total_certs_len = cursor.read_u24::<BigEndian>()? as usize;
-
-    if total_certs_len != payload.len() - (cursor.position() as usize) {
-        return Err(TlsParserError::MalformedMessage(format!(
-            "Certificate list declared length ({}) does not match actual remaining payload ({}).",
-            total_certs_len,
-            payload.len() - (cursor.position() as usize)
-        )));
-    }
-
-    let mut certificates = Vec::new();
-    while (cursor.position() as usize) < payload.len() {
-        if (cursor.position() as usize) + 3 > payload.len() {
-            return Err(TlsParserError::MalformedCertificateList);
-        }
-        let cert_len = cursor.read_u24::<BigEndian>()? as usize;
-
-        if (cursor.position() as usize) + cert_len > payload.len() {
-            return Err(TlsParserError::MalformedMessage(format!(
-                "Individual certificate length ({}) exceeds list bounds. Remaining payload: {}",
-                cert_len,
-                payload.len() - (cursor.position() as usize)
-            )));
-        }
-
-        let mut cert_bytes = vec![0; cert_len];
-        cursor.read_exact(&mut cert_bytes)?;
-        certificates.push(cert_bytes);
-    }
-
-    if (cursor.position() as usize) != payload.len() {
-        return Err(TlsParserError::MalformedMessage(
-            "Trailing data found after certificate list parsing.".to_string(),
-        ));
-    }
-
-    Ok(certificates)
-}
-
-pub fn parse_server_key_exchange_content(
-    payload: &[u8],
-) -> Result<ServerKeyExchangeParsed, TlsParserError> {
-    let mut cursor = Cursor::new(payload);
-    let start_params = 0;
-
-    let curve_type = cursor.read_u8()?;
-    if curve_type != 0x03 {
-        return Err(TlsParserError::InvalidNamedGroup(curve_type as u16));
-    }
-
-    let named_curve = cursor.read_u16::<BigEndian>()?;
-    if NamedGroup::try_from_u16(named_curve).is_none() {
-        return Err(TlsParserError::InvalidNamedGroup(named_curve));
-    }
-
-    let public_key_len = cursor.read_u8()? as usize;
-    let mut public_key_bytes = vec![0; public_key_len];
-    cursor.read_exact(&mut public_key_bytes)?;
-
-    let end_params = cursor.position() as usize;
-    let params_raw = payload[start_params..end_params].to_vec();
-
-    let mut signature_algorithm = [0; 2];
-    cursor.read_exact(&mut signature_algorithm)?;
-
-    let signature_len = cursor.read_u16::<BigEndian>()? as usize;
-    let mut signature_bytes = vec![0; signature_len];
-    cursor.read_exact(&mut signature_bytes)?;
-
-    if cursor.position() as usize != payload.len() {
-        return Err(TlsParserError::MalformedMessage(
-            "ServerKeyExchange payload has unread trailing data".to_string(),
-        ));
-    }
-
-    Ok(ServerKeyExchangeParsed {
-        curve_type,
-        named_curve,
-        public_key: public_key_bytes,
-        signature_algorithm,
-        signature: signature_bytes,
-        params_raw,
-    })
-}
-
+/// Parse TLS 1.3 ServerHello payload
 pub fn parse_tls13_server_hello_payload(
     payload: &[u8],
 ) -> Result<ServerHello13Parsed, TlsParserError> {
     let mut cursor = Cursor::new(payload);
     let mut parsed_sh = ServerHello13Parsed::default();
 
-    // Legacy Version (2 bytes)
-    if payload.len() < 2 {
-        return Err(TlsParserError::MalformedServerHello);
-    }
+    // Parse legacy version (2 bytes)
     parsed_sh.legacy_version = (cursor.read_u8()?, cursor.read_u8()?);
 
-    // Server Random (32 bytes)
-    if cursor.position() as usize + 32 > payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
+    // Parse server random (32 bytes)
     cursor.read_exact(&mut parsed_sh.server_random)?;
 
-    // Session ID
-    if cursor.position() as usize >= payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
+    // Parse session ID
     let session_id_len = cursor.read_u8()? as usize;
-
-    if cursor.position() as usize + session_id_len > payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
     parsed_sh.session_id.resize(session_id_len, 0);
     cursor.read_exact(&mut parsed_sh.session_id)?;
 
-    // Chosen Cipher Suite (2 bytes)
-    if cursor.position() as usize + 2 > payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
+    // Parse chosen cipher suite (2 bytes)
     cursor.read_exact(&mut parsed_sh.chosen_cipher_suite)?;
 
-    // Legacy Compression Method (1 byte)
-    if cursor.position() as usize >= payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
-    }
+    // Parse legacy compression method (1 byte)
     parsed_sh.legacy_compression_method = cursor.read_u8()?;
 
-    // Extensions (Optional)
-    if (cursor.position() as usize) + 2 <= payload.len() {
+    // Parse extensions (optional)
+    if cursor.position() as usize + 2 <= payload.len() {
         let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
 
         if cursor.position() as usize + extensions_len > payload.len() {
             return Err(TlsParserError::MalformedServerHello);
         }
 
-        let extensions_data_start = cursor.position() as usize;
-        let extensions_data_end = extensions_data_start + extensions_len;
-        let extensions_data_slice = &payload[extensions_data_start..extensions_data_end];
-        let mut ext_cursor = Cursor::new(extensions_data_slice);
+        let extensions_start = cursor.position() as usize;
+        let extensions_end = extensions_start + extensions_len;
+        let extensions_slice = &payload[extensions_start..extensions_end];
+        let mut ext_cursor = Cursor::new(extensions_slice);
 
         while (ext_cursor.position() as usize) < extensions_len {
             let extension = parse_tls_extension(&mut ext_cursor)?;
             parsed_sh.extensions.push(extension);
         }
-        cursor.set_position(cursor.position() + extensions_len as u64);
-    } else if (cursor.position() as usize) < payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
+
+        cursor.set_position(extensions_end as u64);
     }
 
     // Process parsed extensions
@@ -1033,30 +816,120 @@ pub fn parse_tls13_server_hello_payload(
             }
             EXTENSION_TYPE_KEY_SHARE => {
                 if ext.payload.len() >= 4 {
-                    let mut key_share_cursor = Cursor::new(&ext.payload);
-                    let named_group_id = key_share_cursor.read_u16::<BigEndian>()?;
+                    let mut key_cursor = Cursor::new(&ext.payload);
+                    let named_group_id = key_cursor.read_u16::<BigEndian>()?;
                     parsed_sh.selected_named_group = NamedGroup::try_from_u16(named_group_id);
 
-                    let key_len = key_share_cursor.read_u16::<BigEndian>()? as usize;
+                    let key_len = key_cursor.read_u16::<BigEndian>()? as usize;
                     if ext.payload.len() >= 4 + key_len {
-                        let mut public_key_bytes = vec![0u8; key_len];
-                        key_share_cursor.read_exact(&mut public_key_bytes)?;
-                        parsed_sh.server_key_share_public = Some(public_key_bytes);
+                        let mut public_key = vec![0u8; key_len];
+                        key_cursor.read_exact(&mut public_key)?;
+                        parsed_sh.server_key_share_public = Some(public_key);
                     }
                 }
             }
-            _ => {}
+            _ => {} // Ignore other extensions
         }
-    }
-
-    // Final check for unread data
-    if cursor.position() as usize != payload.len() {
-        return Err(TlsParserError::MalformedServerHello);
     }
 
     Ok(parsed_sh)
 }
 
+/// Parse certificate list from Certificate handshake message
+pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserError> {
+    let mut cursor = Cursor::new(payload);
+
+    if payload.len() < 3 {
+        return Err(TlsParserError::MalformedCertificateList);
+    }
+
+    let total_certs_len = ReadBytesExt::read_u24::<BigEndian>(&mut cursor)? as usize;
+
+    if total_certs_len != payload.len() - 3 {
+        return Err(TlsParserError::MalformedMessage(format!(
+            "Certificate list length mismatch: expected {}, got {}",
+            total_certs_len,
+            payload.len() - 3
+        )));
+    }
+
+    let mut certificates = Vec::new();
+    while (cursor.position() as usize) < payload.len() {
+        if cursor.position() as usize + 3 > payload.len() {
+            return Err(TlsParserError::MalformedCertificateList);
+        }
+
+        let cert_len = ReadBytesExt::read_u24::<BigEndian>(&mut cursor)? as usize;
+
+        if cursor.position() as usize + cert_len > payload.len() {
+            return Err(TlsParserError::MalformedMessage(format!(
+                "Certificate length exceeds bounds: {} > {}",
+                cert_len,
+                payload.len() - cursor.position() as usize
+            )));
+        }
+
+        let mut cert_bytes = vec![0; cert_len];
+        cursor.read_exact(&mut cert_bytes)?;
+        certificates.push(cert_bytes);
+    }
+
+    Ok(certificates)
+}
+
+/// Parse ServerKeyExchange message content
+pub fn parse_server_key_exchange_content(
+    payload: &[u8],
+) -> Result<ServerKeyExchangeParsed, TlsParserError> {
+    let mut cursor = Cursor::new(payload);
+    let start_params = 0;
+
+    // Parse curve type (must be 0x03 for named curve)
+    let curve_type = cursor.read_u8()?;
+    if curve_type != 0x03 {
+        return Err(TlsParserError::InvalidNamedGroup(curve_type as u16));
+    }
+
+    // Parse named curve
+    let named_curve = cursor.read_u16::<BigEndian>()?;
+    if NamedGroup::try_from_u16(named_curve).is_none() {
+        return Err(TlsParserError::InvalidNamedGroup(named_curve));
+    }
+
+    // Parse public key
+    let public_key_len = cursor.read_u8()? as usize;
+    let mut public_key = vec![0; public_key_len];
+    cursor.read_exact(&mut public_key)?;
+
+    let end_params = cursor.position() as usize;
+    let params_raw = payload[start_params..end_params].to_vec();
+
+    // Parse signature algorithm
+    let mut signature_algorithm = [0; 2];
+    cursor.read_exact(&mut signature_algorithm)?;
+
+    // Parse signature
+    let signature_len = cursor.read_u16::<BigEndian>()? as usize;
+    let mut signature = vec![0; signature_len];
+    cursor.read_exact(&mut signature)?;
+
+    if cursor.position() as usize != payload.len() {
+        return Err(TlsParserError::MalformedMessage(
+            "ServerKeyExchange has trailing data".to_string(),
+        ));
+    }
+
+    Ok(ServerKeyExchangeParsed {
+        curve_type,
+        named_curve,
+        public_key,
+        signature_algorithm,
+        signature,
+        params_raw,
+    })
+}
+
+/// Parse TLS alert message
 pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
     if payload.len() < 2 {
         return Err(TlsParserError::MalformedMessage(
@@ -1064,8 +937,5 @@ pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
         ));
     }
 
-    let level = payload[0];
-    let description = payload[1];
-
-    Ok(TlsAlert::new(level, description))
+    Ok(TlsAlert::new(payload[0], payload[1]))
 }

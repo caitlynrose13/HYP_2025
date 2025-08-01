@@ -9,10 +9,6 @@ use std::io::Read;
 use std::net::TcpStream;
 use std::sync::Mutex;
 
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-
 const MAX_CONSECUTIVE_DECRYPT_FAILURES: usize = 3;
 const MAX_ALTERNATIVE_SEQUENCES: u64 = 5;
 const MAX_TLS_RECORD_SIZE: usize = 16384;
@@ -20,9 +16,8 @@ const MAX_TLS_RECORD_SIZE: usize = 16384;
 // Add a static buffer for fragmented handshake messages
 static HANDSHAKE_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-// ============================================================================
+// ======================================================
 // MAIN PROCESSING FUNCTION
-// ============================================================================
 
 /// Process encrypted handshake records after ServerHello in TLS 1.3
 pub fn process_encrypted_handshake_records(
@@ -121,7 +116,6 @@ pub fn process_encrypted_handshake_records(
 
 // ============================================================================
 // HELPER FUNCTIONS
-// ============================================================================
 
 /// Handle TLS Alert messages
 fn handle_alert(payload: &[u8]) -> Result<(), TlsError> {
@@ -417,7 +411,6 @@ fn get_hash_algorithm(cipher_suite: &CipherSuite) -> TranscriptHashAlgorithm {
 
 // ============================================================================
 // TLS RECORD READING
-// ============================================================================
 
 /// Read a single TLS record from a stream
 pub fn read_tls_record(stream: &mut TcpStream) -> Result<TlsRecord, TlsError> {
