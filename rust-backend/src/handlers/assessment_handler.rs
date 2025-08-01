@@ -7,9 +7,6 @@ use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-// ====================================
-// REQUEST/RESPONSE MODELS
-
 #[derive(Debug, Serialize, Clone, Deserialize, PartialEq)]
 pub struct AssessmentRequest {
     pub domain: String,
@@ -29,8 +26,9 @@ pub struct AssessmentResponse {
     pub tls_scan_duration: String,
 }
 
-// ======================
+// ====================================
 // DATA STRUCTURES
+// ====================================
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct CertificateInfo {
@@ -77,86 +75,8 @@ pub struct KeyExchangeInfo {
     pub curve_name: Option<String>,
 }
 
-// ===========================================
-// MAIN ASSESSMENT HANDLER
-
-pub async fn assess_domain(
-    State(state): State<AppState>,
-    Json(payload): Json<AssessmentRequest>,
-) -> (StatusCode, Json<AssessmentResponse>) {
-    let scan_start = std::time::Instant::now();
-    let domain = payload.domain.trim();
-
-    // Check for cached result first
-    if let Some(cached_response) = check_cached_scan(&state, domain).await {
-        return cached_response;
-    }
-
-    println!("=== STARTING NEW TLS ASSESSMENT ===");
-    println!("Domain: {}", domain);
-    println!(
-        "Timestamp: {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-    );
-
-    // Initialize data structures
-    let mut assessment_data = AssessmentData::new();
-
-    // Perform HSTS check
-    let hsts_supported = check_hsts_support(domain).await;
-    assessment_data.grade_input.hsts = hsts_supported;
-
-    // Run TLS assessments
-    assess_tls_protocols(domain, &mut assessment_data).await;
-
-    // Calculate final grade
-    let whois_resp = crate::services::security_grader::whois_query(domain).ok();
-    let (grade, explanation) = crate::services::security_grader::get_or_run_scan(
-        domain,
-        &assessment_data.grade_input,
-        &assessment_data.certificate_info,
-        &assessment_data.protocols,
-        &assessment_data.cipher_suites,
-        &assessment_data.vulnerabilities,
-        &assessment_data.key_exchange,
-        whois_resp.as_deref(),
-    );
-
-    println!("Final Grade: {:?}", grade);
-    println!("=== Assessment Complete ===\n");
-
-    // Store result in database
-    let scan_duration_str = format!("{:.2}s", scan_start.elapsed().as_secs_f32());
-    store_scan_result(
-        &state,
-        domain,
-        &grade,
-        &assessment_data,
-        &explanation,
-        &scan_duration_str,
-    )
-    .await;
-
-    // Return response
-    (
-        StatusCode::OK,
-        Json(AssessmentResponse {
-            domain: domain.to_string(),
-            grade,
-            certificate: assessment_data.certificate_info,
-            protocols: assessment_data.protocols,
-            cipher_suites: assessment_data.cipher_suites,
-            vulnerabilities: assessment_data.vulnerabilities,
-            key_exchange: assessment_data.key_exchange,
-            message: get_assessment_message(&assessment_data.grade_input),
-            explanation: explanation.unwrap_or_else(|| "No issues found".to_string()),
-            tls_scan_duration: scan_duration_str,
-        }),
-    )
-}
-
-// ==========================================
-// HELPER STRUCTURES
+// ====================================
+// DATA STRUCTURES
 
 struct AssessmentData {
     pub certificate_info: CertificateInfo,
@@ -198,9 +118,87 @@ impl AssessmentData {
     }
 }
 
-// ============================
-// CACHED SCAN HANDLING
+// ====================================
+// MAIN ASSESSMENT HANDLER
+// ====================================
 
+/// Main entry point for TLS domain assessment
+pub async fn assess_domain(
+    State(state): State<AppState>,
+    Json(payload): Json<AssessmentRequest>,
+) -> (StatusCode, Json<AssessmentResponse>) {
+    let scan_start = std::time::Instant::now();
+    let domain = payload.domain.trim();
+
+    // Check for cached results first
+    if let Some(cached_response) = check_cached_scan(&state, domain).await {
+        return cached_response;
+    }
+
+    println!("=== STARTING NEW TLS ASSESSMENT ===");
+    println!("Domain: {}", domain);
+    println!(
+        "Timestamp: {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
+
+    // Initialize assessment data
+    let mut assessment_data = AssessmentData::new();
+
+    // Perform security checks
+    assessment_data.grade_input.hsts = check_hsts_support(domain).await;
+    assess_tls_protocols(domain, &mut assessment_data).await;
+
+    // Calculate final grade and explanation
+    let whois_resp = crate::services::security_grader::whois_query(domain).ok();
+    let (grade, explanation) = crate::services::security_grader::get_or_run_scan(
+        domain,
+        &assessment_data.grade_input,
+        &assessment_data.certificate_info,
+        &assessment_data.protocols,
+        &assessment_data.cipher_suites,
+        &assessment_data.vulnerabilities,
+        &assessment_data.key_exchange,
+        whois_resp.as_deref(),
+    );
+
+    println!("Final Grade: {:?}", grade);
+    println!("=== Assessment Complete ===\n");
+
+    // Store results and prepare response
+    let scan_duration_str = format!("{:.2}s", scan_start.elapsed().as_secs_f32());
+    store_scan_result(
+        &state,
+        domain,
+        &grade,
+        &assessment_data,
+        &explanation,
+        &scan_duration_str,
+    )
+    .await;
+
+    (
+        StatusCode::OK,
+        Json(AssessmentResponse {
+            domain: domain.to_string(),
+            grade,
+            certificate: assessment_data.certificate_info,
+            protocols: assessment_data.protocols,
+            cipher_suites: assessment_data.cipher_suites,
+            vulnerabilities: assessment_data.vulnerabilities,
+            key_exchange: assessment_data.key_exchange,
+            message: get_assessment_message(&assessment_data.grade_input),
+            explanation: explanation.unwrap_or_else(|| "No issues found".to_string()),
+            tls_scan_duration: scan_duration_str,
+        }),
+    )
+}
+
+// ====================================
+// CACHE MANAGEMENT
+// ====================================
+
+/// Check for recent cached scan results
 async fn check_cached_scan(
     state: &AppState,
     domain: &str,
@@ -214,6 +212,7 @@ async fn check_cached_scan(
                 domain
             );
 
+            // Deserialize cached data
             let certificate_info: CertificateInfo =
                 serde_json::from_str(&recent_scan.certificate_json).unwrap_or_default();
             let protocols: ProtocolSupport =
@@ -261,23 +260,19 @@ async fn check_cached_scan(
     }
 }
 
-// ================================================
+// ====================================
 // TLS PROTOCOL ASSESSMENT
+// ====================================
 
+/// Assess all TLS protocol versions and cipher suites
 async fn assess_tls_protocols(domain: &str, data: &mut AssessmentData) {
-    // Test TLS 1.2
     assess_tls12(domain, data).await;
-
-    // Test TLS 1.3
     assess_tls13(domain, data).await;
-
-    // Test legacy protocols
     assess_legacy_protocols(domain, data);
-
-    // Assess vulnerabilities based on protocol support
     assess_vulnerabilities(data);
 }
 
+/// Assess TLS 1.2 support and extract cipher/certificate information
 async fn assess_tls12(domain: &str, data: &mut AssessmentData) {
     let tls12_result =
         crate::services::tls_handshake::client_handshake::perform_tls_handshake_full_with_cert(
@@ -291,6 +286,7 @@ async fn assess_tls12(domain: &str, data: &mut AssessmentData) {
             data.protocols.tls_1_2 = "Supported".to_string();
             data.grade_input.tls12_supported = true;
 
+            // Extract cipher suite information
             let suite_name = crate::services::tls_parser::get_cipher_suite_name(
                 &state.negotiated_cipher_suite.id,
             );
@@ -301,13 +297,10 @@ async fn assess_tls12(domain: &str, data: &mut AssessmentData) {
                 data.grade_input.cipher_is_strong = is_cipher_suite_strong(&suite_name);
             }
 
-            if suite_name.contains("ECDHE") {
-                data.grade_input.forward_secrecy = true;
-                data.key_exchange.supports_forward_secrecy = true;
-                data.key_exchange.key_exchange_algorithm = Some("ECDHE".to_string());
-                data.key_exchange.curve_name = Some("P-256".to_string());
-            }
+            // Extract key exchange information
+            extract_tls12_key_exchange_info(&suite_name, &state, data);
 
+            // Process certificate if available
             if let Some(cert_der) = cert_der {
                 process_certificate(&cert_der, &mut data.certificate_info, &mut data.grade_input);
             }
@@ -318,6 +311,7 @@ async fn assess_tls12(domain: &str, data: &mut AssessmentData) {
     }
 }
 
+/// Assess TLS 1.3 support and extract cipher/certificate information
 async fn assess_tls13(domain: &str, data: &mut AssessmentData) {
     let tls13_result =
         crate::services::tls_handshake::tls13::client::perform_tls13_handshake_full_with_cert(
@@ -329,18 +323,18 @@ async fn assess_tls13(domain: &str, data: &mut AssessmentData) {
             println!("✓ TLS 1.3 handshake succeeded for {}", domain);
             data.protocols.tls_1_3 = "Supported".to_string();
             data.grade_input.tls13_supported = true;
-            data.grade_input.cipher_is_strong = true; // TLS 1.3 cipher suites are always strong
+            data.grade_input.cipher_is_strong = true;
 
-            if !data.grade_input.forward_secrecy {
-                data.grade_input.forward_secrecy = true;
-                data.key_exchange.supports_forward_secrecy = true;
-            }
+            // Extract key exchange information (TLS 1.3 always has forward secrecy)
+            extract_tls13_key_exchange_info(&state, data);
 
+            // Extract cipher suite information
             let suite_name =
                 crate::services::tls_parser::get_cipher_suite_name(&state.negotiated_cipher_suite);
             data.cipher_suites.preferred_suite = Some(suite_name.clone());
             data.cipher_suites.tls_1_3_suites.push(suite_name);
 
+            // Process certificate if available
             if let Some(cert_der) = cert_der_opt {
                 process_certificate(&cert_der, &mut data.certificate_info, &mut data.grade_input);
             }
@@ -351,6 +345,7 @@ async fn assess_tls13(domain: &str, data: &mut AssessmentData) {
     }
 }
 
+/// Test legacy TLS protocol support (1.0 and 1.1)
 fn assess_legacy_protocols(domain: &str, data: &mut AssessmentData) {
     data.protocols.tls_1_0 = if test_tls10(domain) {
         data.grade_input.tls10_supported = true;
@@ -367,17 +362,95 @@ fn assess_legacy_protocols(domain: &str, data: &mut AssessmentData) {
     };
 }
 
-// ==============================
-// HELPER FUNCTIONS
+// ====================================
+// KEY EXCHANGE ANALYSIS
+// ====================================
 
-async fn check_hsts_support(domain: &str) -> bool {
-    if let Ok(resp) = reqwest::get(format!("https://{}", domain)).await {
-        resp.headers().get("strict-transport-security").is_some()
-    } else {
-        false
+/// Extract key exchange information from TLS 1.2 handshake
+fn extract_tls12_key_exchange_info(
+    suite_name: &str,
+    state: &crate::services::tls_handshake::client_handshake::TlsConnectionState,
+    data: &mut AssessmentData,
+) {
+    if suite_name.contains("ECDHE") {
+        println!("[DEBUG] ===== TLS 1.2 KEY EXCHANGE EXTRACTION =====");
+        println!("[DEBUG] Detected ECDHE in cipher suite: {}", suite_name);
+
+        data.grade_input.forward_secrecy = true;
+        data.key_exchange.supports_forward_secrecy = true;
+        data.key_exchange.key_exchange_algorithm = Some("ECDHE".to_string());
+
+        if let Some(curve) = extract_actual_curve_from_handshake(state) {
+            println!("[DEBUG] Extracted TLS 1.2 curve: {}", curve);
+            data.key_exchange.curve_name = Some(curve);
+        } else {
+            println!("[DEBUG] Could not extract TLS 1.2 curve, using fallback");
+            data.key_exchange.curve_name = Some("Unknown".to_string());
+        }
+
+        println!(
+            "[DEBUG] Final TLS 1.2 key exchange - Algorithm: ECDHE, Curve: {:?}",
+            data.key_exchange.curve_name
+        );
     }
 }
 
+/// Extract key exchange information from TLS 1.3 handshake
+fn extract_tls13_key_exchange_info(
+    state: &crate::services::tls_handshake::tls13::client::Tls13ConnectionState,
+    data: &mut AssessmentData,
+) {
+    if !data.grade_input.forward_secrecy {
+        println!("[DEBUG] ===== TLS 1.3 KEY EXCHANGE EXTRACTION =====");
+
+        data.grade_input.forward_secrecy = true;
+        data.key_exchange.supports_forward_secrecy = true;
+        data.key_exchange.key_exchange_algorithm = Some("ECDHE".to_string());
+
+        if let Some(curve) = extract_actual_curve_from_tls13_handshake(state) {
+            println!("[DEBUG] Extracted TLS 1.3 curve: {}", curve);
+            data.key_exchange.curve_name = Some(curve);
+        } else {
+            println!("[DEBUG] Could not extract TLS 1.3 curve");
+            data.key_exchange.curve_name = Some("Unknown".to_string());
+        }
+
+        println!(
+            "[DEBUG] Final TLS 1.3 key exchange - Algorithm: ECDHE, Curve: {:?}",
+            data.key_exchange.curve_name
+        );
+    }
+}
+
+/// Extract curve information from TLS 1.2 handshake state
+fn extract_actual_curve_from_handshake(
+    state: &crate::services::tls_handshake::client_handshake::TlsConnectionState,
+) -> Option<String> {
+    // TLS 1.2 implementation uses p256 crate, so it's P-256 curve
+    let suite_name =
+        crate::services::tls_parser::get_cipher_suite_name(&state.negotiated_cipher_suite.id);
+
+    if suite_name.contains("ECDHE") {
+        Some("P-256".to_string())
+    } else if suite_name.contains("DHE") {
+        Some("DHE".to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract curve information from TLS 1.3 handshake state
+fn extract_actual_curve_from_tls13_handshake(
+    _state: &crate::services::tls_handshake::tls13::client::Tls13ConnectionState,
+) -> Option<String> {
+    // TLS 1.3 implementation uses ring's X25519 for key exchange
+    Some("X25519".to_string())
+}
+
+// ====================================
+// CERTIFICATE PROCESSING
+
+/// Process and extract certificate information
 fn process_certificate(
     cert_der: &[u8],
     cert_info: &mut CertificateInfo,
@@ -388,6 +461,11 @@ fn process_certificate(
         cert_info.issuer = Some(parsed_cert.issuer.clone());
         cert_info.valid_from = Some(parsed_cert.not_before.clone());
         cert_info.valid_to = Some(parsed_cert.not_after.clone());
+        cert_info.key_size = parsed_cert.key_size.clone();
+        cert_info.signature_algorithm = Some(parsed_cert.signature_algorithm.clone());
+        cert_info.serial_number = Some(parsed_cert.serial_number.clone());
+        cert_info.subject_alt_names = parsed_cert.subject_alt_names.clone();
+
         cert_info.chain_trust = Some(if !parsed_cert.expired {
             "Trusted".to_string()
         } else {
@@ -405,18 +483,35 @@ fn process_certificate(
     }
 }
 
+/// Calculate days until certificate expiry
 fn calculate_days_until_expiry(cert_info: &mut CertificateInfo) {
     if let Some(valid_to) = &cert_info.valid_to {
+        println!("[DEBUG] Calculating expiry for date: {}", valid_to);
+
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ") {
             let now = chrono::Utc::now().naive_utc();
-            cert_info.days_until_expiry = Some((dt - now).num_days());
+            let days = (dt - now).num_days();
+            cert_info.days_until_expiry = Some(days);
+            println!("[DEBUG] Calculated days until expiry: {}", days);
         } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
             let now = chrono::Utc::now().date_naive();
-            cert_info.days_until_expiry = Some((date - now).num_days());
+            let days = (date - now).num_days();
+            cert_info.days_until_expiry = Some(days);
+            println!("[DEBUG] Calculated days until expiry (date only): {}", days);
+        } else {
+            println!("[ERROR] Failed to parse date: {}", valid_to);
+            cert_info.days_until_expiry = None;
         }
+    } else {
+        println!("[ERROR] No valid_to date found in certificate");
+        cert_info.days_until_expiry = None;
     }
 }
 
+// ====================================
+// VULNERABILITY ASSESSMENT
+
+/// Assess common TLS vulnerabilities based on protocol support
 fn assess_vulnerabilities(data: &mut AssessmentData) {
     data.vulnerabilities = VulnerabilityInfo {
         poodle: if data.protocols.tls_1_0 == "Supported" {
@@ -452,6 +547,46 @@ fn assess_vulnerabilities(data: &mut AssessmentData) {
     };
 }
 
+// ====================================
+// UTILITY FUNCTIONS
+// ====================================
+
+/// Check if a domain supports HSTS (HTTP Strict Transport Security)
+async fn check_hsts_support(domain: &str) -> bool {
+    if let Ok(resp) = reqwest::get(format!("https://{}", domain)).await {
+        resp.headers().get("strict-transport-security").is_some()
+    } else {
+        false
+    }
+}
+
+/// Determine if a cipher suite is considered strong
+fn is_cipher_suite_strong(cipher_suite_name: &str) -> bool {
+    let cipher_lower = cipher_suite_name.to_lowercase();
+
+    // TLS 1.3 cipher suites are all strong by design
+    if cipher_lower.contains("tls_aes") || cipher_lower.contains("tls_chacha20") {
+        return true;
+    }
+
+    // For TLS 1.2, check for strong characteristics
+    let has_forward_secrecy = cipher_lower.contains("ecdhe") || cipher_lower.contains("dhe");
+    let has_strong_encryption = cipher_lower.contains("aes_256_gcm")
+        || cipher_lower.contains("aes_128_gcm")
+        || cipher_lower.contains("chacha20");
+
+    // Avoid weak algorithms
+    let has_weak_elements = cipher_lower.contains("md5")
+        || cipher_lower.contains("sha1")
+        || cipher_lower.contains("des")
+        || cipher_lower.contains("rc4")
+        || cipher_lower.contains("null")
+        || cipher_lower.contains("export");
+
+    has_forward_secrecy && has_strong_encryption && !has_weak_elements
+}
+
+/// Store scan results in database
 async fn store_scan_result(
     state: &AppState,
     domain: &str,
@@ -485,11 +620,12 @@ async fn store_scan_result(
     )
     .await
     {
-        Ok(_) => println!("[DEBUG]Database insert successful for {}", domain),
-        Err(e) => println!("[ERROR]Database insert failed for {}: {:?}", domain, e),
+        Ok(_) => println!("[DEBUG] Database insert successful for {}", domain),
+        Err(e) => println!("[ERROR] Database insert failed for {}: {:?}", domain, e),
     }
 }
 
+/// Parse grade string back to Grade enum
 fn parse_grade_from_string(grade_str: &str) -> Grade {
     match grade_str {
         "APlus" => Grade::APlus,
@@ -502,35 +638,11 @@ fn parse_grade_from_string(grade_str: &str) -> Grade {
     }
 }
 
+/// Generate assessment completion message
 fn get_assessment_message(grade_input: &GradeInput) -> String {
     if !grade_input.tls12_supported && !grade_input.tls13_supported {
         "TLS assessment completed with limited support".to_string()
     } else {
         "TLS assessment completed".to_string()
     }
-}
-
-fn is_cipher_suite_strong(cipher_suite_name: &str) -> bool {
-    let cipher_lower = cipher_suite_name.to_lowercase();
-
-    // TLS 1.3 cipher suites are all strong by design
-    if cipher_lower.contains("tls_aes") || cipher_lower.contains("tls_chacha20") {
-        return true;
-    }
-
-    // For TLS 1.2, check for strong characteristics
-    let has_forward_secrecy = cipher_lower.contains("ecdhe") || cipher_lower.contains("dhe");
-    let has_strong_encryption = cipher_lower.contains("aes_256_gcm")
-        || cipher_lower.contains("aes_128_gcm")
-        || cipher_lower.contains("chacha20");
-
-    // Avoid weak algorithms
-    let has_weak_elements = cipher_lower.contains("md5")
-        || cipher_lower.contains("sha1")
-        || cipher_lower.contains("des")
-        || cipher_lower.contains("rc4")
-        || cipher_lower.contains("null")
-        || cipher_lower.contains("export");
-
-    has_forward_secrecy && has_strong_encryption && !has_weak_elements
 }

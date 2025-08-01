@@ -35,11 +35,15 @@ pub fn build_raw_client_hello_handshake(
     let mut session_id = [0u8; 32];
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut session_id);
-    client_hello_payload.extend_from_slice(&session_id); // Cipher suites - TLS 1.3 cipher suites only
+    client_hello_payload.extend_from_slice(&session_id); // Cipher suites - TLS 1.3 cipher suites for maximum compatibility
     let cipher_suites: Vec<[u8; 2]> = vec![
-        [0x13, 0x01], // TLS_AES_128_GCM_SHA256
+        // Standard TLS 1.3 cipher suites (mandatory/recommended)
+        [0x13, 0x01], // TLS_AES_128_GCM_SHA256 (mandatory)
         [0x13, 0x02], // TLS_AES_256_GCM_SHA384
         [0x13, 0x03], // TLS_CHACHA20_POLY1305_SHA256
+        // Additional TLS 1.3 cipher suites for broader compatibility
+        [0x13, 0x04], // TLS_AES_128_CCM_SHA256 (for constrained environments)
+        [0x13, 0x05], // TLS_AES_128_CCM_8_SHA256 (IoT/embedded devices)
     ];
     let mut cipher_suites_bytes = Vec::new();
     for cs in &cipher_suites {
@@ -65,16 +69,14 @@ pub fn build_raw_client_hello_handshake(
     extensions_bytes
         .extend_from_slice(&Extension::new(EXTENSION_TYPE_SERVER_NAME, &sni_payload).to_bytes());
 
-    // 2. Supported Groups - Extension type 0x000A - Match OpenSSL format
-    let mut supported_groups = Vec::new();
-    let groups: [[u8; 2]; 6] = [
-        [0x01, 0x1e],                  // x448 (0x011e)
-        NamedGroup::X25519.as_bytes(), // 0x001D
-        NamedGroup::P256.as_bytes(),   // 0x0017
-        [0x00, 0x18],                  // secp384r1
-        [0x00, 0x19],                  // secp521r1
-        [0x00, 0x1a],                  // secp256k1
+    // 2. Supported Groups - Extension type 0x000A - Conservative list for better compatibility
+    let groups: [[u8; 2]; 4] = [
+        NamedGroup::X25519.as_bytes(), // x25519 (most common, should be first)
+        NamedGroup::P256.as_bytes(),   // secp256r1 (widely supported)
+        [0x00, 0x18],                  // secp384r1 (enterprise)
+        [0x00, 0x19],                  // secp521r1 (high security)
     ];
+    let mut supported_groups = Vec::new();
     supported_groups.extend_from_slice(&((groups.len() * 2) as u16).to_be_bytes());
     for g in &groups {
         supported_groups.extend_from_slice(g);

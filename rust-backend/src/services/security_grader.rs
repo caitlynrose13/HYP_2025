@@ -114,9 +114,8 @@ pub fn parse_whois_response(response: &str) -> WhoisInfo {
     }
 }
 
-// ============================================================================
+// ==============
 // GRADING SYSTEM
-// ============================================================================
 
 pub fn grade_site(input: &GradeInput, _certificate: &CertificateInfo) -> (Grade, Vec<String>) {
     let mut score = 100;

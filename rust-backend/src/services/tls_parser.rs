@@ -1,64 +1,38 @@
 use super::errors::TlsError;
 use byteorder::{BigEndian, ReadBytesExt};
-use std::io::{Cursor, Read, Write}; // Ensure ReadBytesExt is used
+use std::io::{Cursor, Read};
 
-// =========================
-// TLS Constants & Types
-// =========================
-
-// --- TLS Versions ---
+// TLS Versions
 pub const TLS_1_2_MAJOR: u8 = 0x03;
 pub const TLS_1_2_MINOR: u8 = 0x03;
 
-// --- TLS Alert Levels & Descriptions ---
+// TLS Alert Levels
 pub const TLS_ALERT_LEVEL_WARNING: u8 = 0x01;
 pub const TLS_ALERT_LEVEL_FATAL: u8 = 0x02;
+
+// TLS Alert Descriptions
 pub const TLS_ALERT_CLOSE_NOTIFY: u8 = 0x00;
-pub const TLS_ALERT_UNEXPECTED_MESSAGE: u8 = 0x0a;
-pub const TLS_ALERT_BAD_RECORD_MAC: u8 = 0x14;
-pub const TLS_ALERT_DECRYPTION_FAILED: u8 = 0x15;
-pub const TLS_ALERT_RECORD_OVERFLOW: u8 = 0x16;
-pub const TLS_ALERT_DECOMPRESSION_FAILURE: u8 = 0x1e;
 pub const TLS_ALERT_HANDSHAKE_FAILURE: u8 = 0x28;
-pub const TLS_ALERT_NO_CERTIFICATE: u8 = 0x29;
-pub const TLS_ALERT_BAD_CERTIFICATE: u8 = 0x2a;
-pub const TLS_ALERT_UNSUPPORTED_CERTIFICATE: u8 = 0x2b;
-pub const TLS_ALERT_CERTIFICATE_REVOKED: u8 = 0x2c;
-pub const TLS_ALERT_CERTIFICATE_EXPIRED: u8 = 0x2d;
-pub const TLS_ALERT_CERTIFICATE_UNKNOWN: u8 = 0x2e;
-pub const TLS_ALERT_ILLEGAL_PARAMETER: u8 = 0x2f;
-pub const TLS_ALERT_UNKNOWN_CA: u8 = 0x30;
-pub const TLS_ALERT_ACCESS_DENIED: u8 = 0x31;
-pub const TLS_ALERT_DECODE_ERROR: u8 = 0x32;
-pub const TLS_ALERT_DECRYPT_ERROR: u8 = 0x33;
-pub const TLS_ALERT_EXPORT_RESTRICTION: u8 = 0x3c;
 pub const TLS_ALERT_PROTOCOL_VERSION: u8 = 0x46;
-pub const TLS_ALERT_INSUFFICIENT_SECURITY: u8 = 0x47;
 pub const TLS_ALERT_INTERNAL_ERROR: u8 = 0x50;
-pub const TLS_ALERT_USER_CANCELED: u8 = 0x5a;
-pub const TLS_ALERT_NO_RENEGOTIATION: u8 = 0x64;
-pub const TLS_ALERT_UNSUPPORTED_EXTENSION: u8 = 0x6e;
 
-// --- ClientHello Specific ---
-pub const SESSION_ID_LEN_EMPTY: u8 = 0x00;
-pub const COMPRESSION_METHOD_NULL: u8 = 0x00;
-pub const COMPRESSION_METHODS_LEN: u8 = 0x01;
-
-// --- Extension Types ---
+// Extension Types
 pub const EXTENSION_TYPE_SERVER_NAME: u16 = 0x0000;
 pub const EXTENSION_TYPE_SUPPORTED_GROUPS: u16 = 0x000A;
-pub const EXTENSION_TYPE_KEY_SHARE: u16 = 0x0033;
-pub const EXTENSION_TYPE_SUPPORTED_VERSIONS: u16 = 0x002B;
 pub const EXTENSION_TYPE_SIGNATURE_ALGORITHMS: u16 = 0x000D;
+pub const EXTENSION_TYPE_SUPPORTED_VERSIONS: u16 = 0x002B;
+pub const EXTENSION_TYPE_KEY_SHARE: u16 = 0x0033;
 
-// --- SNI ---
+// SNI
 pub const SNI_HOSTNAME_TYPE: u8 = 0x00;
 
-// --- Signature Algorithms ---
+// Signature Algorithms
 pub const SIG_ALG_ECDSA_SECP256R1_SHA256: [u8; 2] = [0x04, 0x03];
 pub const SIG_ALG_RSA_PSS_RSAE_SHA256: [u8; 2] = [0x08, 0x04];
-pub const SIG_ALG_RSA_PSS_RSAE_SHA512: [u8; 2] = [0x08, 0x05];
 pub const SIG_ALG_RSA_PKCS1_SHA256: [u8; 2] = [0x04, 0x01];
+
+// ================
+// ERROR TYPES
 
 #[derive(Debug)]
 pub enum TlsParserError {
@@ -119,29 +93,30 @@ impl std::fmt::Display for TlsParserError {
 
 impl std::error::Error for TlsParserError {}
 
+// ==========================================
+// CORE TLS TYPES
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)] // Ensures the enum variants correspond directly to their u8 values
+#[repr(u8)]
 pub enum TlsContentType {
     ChangeCipherSpec = 0x14,
     Alert = 0x15,
     Handshake = 0x16,
     ApplicationData = 0x17,
-    // Heartbeat = 0x18,
 }
 
 impl TlsContentType {
     pub fn as_u8(&self) -> u8 {
         *self as u8
     }
-    // A more robust conversion from u8 that returns Option or Result
+
     pub fn try_from_u8(value: u8) -> Option<Self> {
         match value {
             0x14 => Some(TlsContentType::ChangeCipherSpec),
             0x15 => Some(TlsContentType::Alert),
             0x16 => Some(TlsContentType::Handshake),
             0x17 => Some(TlsContentType::ApplicationData),
-            // 0x18 => Some(TlsContentType::Heartbeat), // Uncomment if Heartbeat is added
-            _ => None, // Return None for unknown values
+            _ => None,
         }
     }
 }
@@ -149,23 +124,8 @@ impl TlsContentType {
 impl From<u8> for TlsContentType {
     fn from(value: u8) -> Self {
         TlsContentType::try_from_u8(value).unwrap_or_else(|| {
-            panic!("Invalid TlsContentType value: 0x{:02X}", value); // Or a specific error handling
+            panic!("Invalid TlsContentType value: 0x{:02X}", value);
         })
-    }
-}
-
-#[derive(Debug)]
-pub struct TlsRecord {
-    pub content_type: TlsContentType,
-    pub version_major: u8,
-    pub version_minor: u8,
-    pub length: u16,
-    pub payload: Vec<u8>,
-}
-
-impl TlsRecord {
-    pub fn version_major_minor(&self) -> (u8, u8) {
-        (self.version_major, self.version_minor)
     }
 }
 
@@ -175,18 +135,18 @@ pub enum HandshakeMessageType {
     HelloRequest = 0x00,
     ClientHello = 0x01,
     ServerHello = 0x02,
-    NewSessionTicket = 0x04,    // TLS 1.2/1.3
-    EndOfEarlyData = 0x05,      // TLS 1.3
-    EncryptedExtensions = 0x08, // TLS 1.3
+    NewSessionTicket = 0x04,
+    EndOfEarlyData = 0x05,
+    EncryptedExtensions = 0x08,
     Certificate = 0x0B,
-    ServerKeyExchange = 0x0C, // TLS 1.2
+    ServerKeyExchange = 0x0C,
     CertificateRequest = 0x0D,
-    ServerHelloDone = 0x0E, // TLS 1.2
+    ServerHelloDone = 0x0E,
     CertificateVerify = 0x0F,
-    ClientKeyExchange = 0x10, // TLS 1.2
+    ClientKeyExchange = 0x10,
     Finished = 0x14,
-    KeyUpdate = 0x18,   // TLS 1.3
-    MessageHash = 0xFE, // TLS 1.3
+    KeyUpdate = 0x18,
+    MessageHash = 0xFE,
 }
 
 impl HandshakeMessageType {
@@ -226,10 +186,10 @@ impl From<u8> for HandshakeMessageType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsVersion {
-    TLS1_0, // 0x0301
-    TLS1_1, // 0x0302
-    TLS1_2, // 0x0303
-    TLS1_3, // 0x0304
+    TLS1_0,
+    TLS1_1,
+    TLS1_2,
+    TLS1_3,
     Unknown(u8, u8),
 }
 
@@ -255,13 +215,12 @@ impl TlsVersion {
     }
 }
 
-// --- TLS 1.3 NamedGroup Enum ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum NamedGroup {
     P256 = 0x0017,
     P384 = 0x0018,
-    X25519 = 0x001D, // Add support for x25519 curve
+    X25519 = 0x001D,
     Unknown(u16),
 }
 
@@ -270,7 +229,7 @@ impl NamedGroup {
         match self {
             NamedGroup::P256 => [0x00, 0x17],
             NamedGroup::P384 => [0x00, 0x18],
-            NamedGroup::X25519 => [0x00, 0x1D], // Add x25519 bytes
+            NamedGroup::X25519 => [0x00, 0x1D],
             NamedGroup::Unknown(id) => id.to_be_bytes(),
         }
     }
@@ -279,17 +238,65 @@ impl NamedGroup {
         match value {
             0x0017 => Some(NamedGroup::P256),
             0x0018 => Some(NamedGroup::P384),
-            0x001D => Some(NamedGroup::X25519), // Add x25519 support
+            0x001D => Some(NamedGroup::X25519),
             _ => None,
         }
     }
 }
 
-// --- TLS Extension Struct ---
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgorithm {
+    Sha256,
+    Sha384,
+}
+
+// =========================================
+// TLS STRUCTURES
+
+#[derive(Debug)]
+pub struct TlsRecord {
+    pub content_type: TlsContentType,
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub length: u16,
+    pub payload: Vec<u8>,
+}
+
+impl TlsRecord {
+    pub fn version_major_minor(&self) -> (u8, u8) {
+        (self.version_major, self.version_minor)
+    }
+}
+
+#[derive(Debug)]
+pub struct TlsHandshakeMessage {
+    pub msg_type: HandshakeMessageType,
+    pub raw_bytes: Vec<u8>,
+    pub length: u32,
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Extension {
     pub extension_type: u16,
     pub payload: Vec<u8>,
+}
+
+impl Extension {
+    pub fn new(extension_type: u16, payload: &[u8]) -> Self {
+        Extension {
+            extension_type,
+            payload: payload.to_vec(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.extension_type.to_be_bytes());
+        bytes.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&self.payload);
+        bytes
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -314,30 +321,10 @@ impl TlsAlert {
     pub fn get_description_name(&self) -> &'static str {
         match self.description {
             TLS_ALERT_CLOSE_NOTIFY => "Close Notify",
-            TLS_ALERT_UNEXPECTED_MESSAGE => "Unexpected Message",
-            TLS_ALERT_BAD_RECORD_MAC => "Bad Record MAC",
-            TLS_ALERT_DECRYPTION_FAILED => "Decryption Failed",
-            TLS_ALERT_RECORD_OVERFLOW => "Record Overflow",
-            TLS_ALERT_DECOMPRESSION_FAILURE => "Decompression Failure",
             TLS_ALERT_HANDSHAKE_FAILURE => "Handshake Failure",
-            TLS_ALERT_NO_CERTIFICATE => "No Certificate",
-            TLS_ALERT_BAD_CERTIFICATE => "Bad Certificate",
-            TLS_ALERT_UNSUPPORTED_CERTIFICATE => "Unsupported Certificate",
-            TLS_ALERT_CERTIFICATE_REVOKED => "Certificate Revoked",
-            TLS_ALERT_CERTIFICATE_EXPIRED => "Certificate Expired",
-            TLS_ALERT_CERTIFICATE_UNKNOWN => "Certificate Unknown",
-            TLS_ALERT_ILLEGAL_PARAMETER => "Illegal Parameter",
-            TLS_ALERT_UNKNOWN_CA => "Unknown CA",
-            TLS_ALERT_ACCESS_DENIED => "Access Denied",
-            TLS_ALERT_DECODE_ERROR => "Decode Error",
-            TLS_ALERT_DECRYPT_ERROR => "Decrypt Error",
-            TLS_ALERT_EXPORT_RESTRICTION => "Export Restriction",
             TLS_ALERT_PROTOCOL_VERSION => "Protocol Version",
-            TLS_ALERT_INSUFFICIENT_SECURITY => "Insufficient Security",
             TLS_ALERT_INTERNAL_ERROR => "Internal Error",
-            TLS_ALERT_USER_CANCELED => "User Canceled",
-            TLS_ALERT_NO_RENEGOTIATION => "No Renegotiation",
-            TLS_ALERT_UNSUPPORTED_EXTENSION => "Unsupported Extension",
+            0x14 => "Bad Record MAC",
             _ => "Unknown Alert",
         }
     }
@@ -353,73 +340,9 @@ impl TlsAlert {
     }
 }
 
-impl Extension {
-    pub fn new(extension_type: u16, payload: &[u8]) -> Self {
-        Extension {
-            extension_type,
-            payload: payload.to_vec(),
-        }
-    }
+// =====================================
+// PARSED MESSAGE STRUCTURES
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.extension_type.to_be_bytes()); // 2 bytes for type
-        bytes.extend_from_slice(&(self.payload.len() as u16).to_be_bytes()); // 2 bytes for length
-        bytes.extend_from_slice(&self.payload); // Payload
-        bytes
-    }
-}
-
-/// TLS Extension parser (used for TLS 1.3 ServerHello and EncryptedExtensions)
-pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsParserError> {
-    let initial_pos = cursor.position() as usize;
-    let remaining_bytes = cursor.get_ref().len() - initial_pos;
-
-    if remaining_bytes < 4 {
-        return Err(TlsParserError::Incomplete {
-            expected: 4,
-            actual: remaining_bytes,
-        });
-    }
-
-    // Manual parsing of u16 for extension type
-    let ext_type_bytes = &cursor.get_ref()[initial_pos..initial_pos + 2];
-    let ext_type = u16::from_be_bytes([ext_type_bytes[0], ext_type_bytes[1]]);
-    cursor.set_position((initial_pos + 2) as u64); // Move cursor past type bytes
-
-    // Manual parsing of u16 for extension length
-    let ext_len_bytes = &cursor.get_ref()[initial_pos + 2..initial_pos + 4];
-    let ext_len = u16::from_be_bytes([ext_len_bytes[0], ext_len_bytes[1]]) as usize;
-    cursor.set_position((initial_pos + 4) as u64); // Move cursor past length bytes
-
-    if remaining_bytes < 4 + ext_len {
-        return Err(TlsParserError::Incomplete {
-            expected: 4 + ext_len,
-            actual: remaining_bytes,
-        });
-    }
-
-    let mut payload_bytes = vec![0u8; ext_len];
-    cursor
-        .read_exact(&mut payload_bytes)
-        .map_err(|_| TlsParserError::InvalidLength)?; // This read_exact is fine with std::io::Read
-
-    Ok(Extension {
-        extension_type: ext_type,
-        payload: payload_bytes,
-    })
-}
-
-// --- TLS Handshake Message ---
-#[derive(Debug)]
-pub struct TlsHandshakeMessage {
-    pub msg_type: HandshakeMessageType,
-    pub raw_bytes: Vec<u8>, // Raw bytes of the handshake message (type + length + payload)
-    pub length: u32,        // Length of the message payload
-    pub payload: Vec<u8>,
-}
-
-// --- TLS 1.2 ServerHello Parsed ---
 #[derive(Debug, Clone)]
 pub struct ServerHelloParsed {
     pub negotiated_tls_version: (u8, u8),
@@ -428,37 +351,29 @@ pub struct ServerHelloParsed {
     pub server_key_share_public: Option<Vec<u8>>,
 }
 
-// --- TLS 1.3 ServerHello Parsed ---
 #[derive(Debug, Clone, Default)]
 pub struct ServerHello13Parsed {
-    // In TLS 1.3, the 'version' field in the record header and ServerHello
-    // is often 0x0301 (TLS 1.0) for compatibility, but the actual negotiated
-    // version is indicated in the 'supported_versions' extension.
-    pub legacy_version: (u8, u8), // The version field from the ServerHello message (often 0x0301 for TLS 1.3)
+    pub legacy_version: (u8, u8),
     pub server_random: [u8; 32],
-    pub session_id: Vec<u8>, // In TLS 1.3, this should be empty
+    pub session_id: Vec<u8>,
     pub chosen_cipher_suite: [u8; 2],
-    pub legacy_compression_method: u8, // In TLS 1.3, this should be 0x00
+    pub legacy_compression_method: u8,
     pub extensions: Vec<Extension>,
-    // Specific TLS 1.3 extensions can be parsed out of the `extensions` Vec later
-    pub negotiated_tls_version: Option<TlsVersion>, // The actual negotiated version from the supported_versions extension
-    pub server_key_share_public: Option<Vec<u8>>,   // Public key from KeyShare extension
-    pub selected_named_group: Option<NamedGroup>,   // Named group from KeyShare extension
+    pub negotiated_tls_version: Option<TlsVersion>,
+    pub server_key_share_public: Option<Vec<u8>>,
+    pub selected_named_group: Option<NamedGroup>,
 }
 
-// --- TLS 1.2 ServerKeyExchange Parsed ---
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServerKeyExchangeParsed {
     pub curve_type: u8,
     pub named_curve: u16,
     pub public_key: Vec<u8>,
     pub signature_algorithm: [u8; 2],
     pub signature: Vec<u8>,
-    pub params_raw: Vec<u8>, // NEW: raw bytes from curve_type through public_key
+    pub params_raw: Vec<u8>,
 }
 
-// --- TLS CipherSuite ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CipherSuite {
     pub id: [u8; 2],
@@ -469,16 +384,55 @@ pub struct CipherSuite {
     pub hash_algorithm: HashAlgorithm,
 }
 
+// Cipher Suite IDs
+pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite {
+    id: [0xc0, 0x2f],
+    name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    key_length: 16,
+    fixed_iv_length: 4,
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha256,
+};
+
+pub const TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: CipherSuite = CipherSuite {
+    id: [0xc0, 0x30],
+    name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    key_length: 32,
+    fixed_iv_length: 4,
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha384,
+};
+
+pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
+    id: [0xCC, 0xA8],
+    name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+    key_length: 32,
+    fixed_iv_length: 4, // ← Add this missing field
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha256, // ← Use local HashAlgorithm
+};
+
+pub const TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
+    id: [0xCC, 0xA9],
+    name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+    key_length: 32,
+    fixed_iv_length: 4, // ← Add this missing field
+    mac_key_length: 0,
+    hash_algorithm: HashAlgorithm::Sha256, // ← Use local HashAlgorithm
+};
+
 impl CipherSuite {
-    pub fn new(id1: u8, id2: u8) -> Self {
-        let id = [id1, id2];
+    pub const fn new(id0: u8, id1: u8) -> Self {
+        let id = [id0, id1];
+
+        // Match the cipher suite ID and return the appropriate CipherSuite
         match id {
             [0x13, 0x01] => CipherSuite {
                 id,
                 name: "TLS_AES_128_GCM_SHA256",
                 key_length: 16,
                 fixed_iv_length: 12,
-                mac_key_length: 32,
+                mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha256,
             },
             [0x13, 0x02] => CipherSuite {
@@ -486,7 +440,7 @@ impl CipherSuite {
                 name: "TLS_AES_256_GCM_SHA384",
                 key_length: 32,
                 fixed_iv_length: 12,
-                mac_key_length: 48,
+                mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha384,
             },
             [0x13, 0x03] => CipherSuite {
@@ -494,11 +448,28 @@ impl CipherSuite {
                 name: "TLS_CHACHA20_POLY1305_SHA256",
                 key_length: 32,
                 fixed_iv_length: 12,
-                mac_key_length: 32,
+                mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha256,
             },
-            _ => CipherSuite {
+            [0xc0, 0x2f] => CipherSuite {
                 id,
+                name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+                key_length: 16,
+                fixed_iv_length: 4,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha256,
+            },
+            [0xc0, 0x30] => CipherSuite {
+                id,
+                name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+                key_length: 32,
+                fixed_iv_length: 4,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha384,
+            },
+            // Default case for unknown cipher suites
+            _ => CipherSuite {
+                id: [0x00, 0x00],
                 name: "UNKNOWN",
                 key_length: 0,
                 fixed_iv_length: 0,
@@ -509,92 +480,171 @@ impl CipherSuite {
     }
 }
 
-// --- TLS HashAlgorithm ---
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HashAlgorithm {
-    Sha256,
-    Sha384, // Add SHA384 for TLS 1.2 PRF
-}
-
-// --- TLS CipherSuite Constants ---
-#[allow(dead_code)]
-pub const TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: CipherSuite = CipherSuite {
-    id: [0xC0, 0x2F],
-    name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-    key_length: 16,
-    fixed_iv_length: 4,
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha256,
-};
-
-#[allow(dead_code)]
-pub const TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: CipherSuite = CipherSuite {
-    id: [0xC0, 0x30],
-    name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-    key_length: 32,
-    fixed_iv_length: 4,
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha384,
-};
-
-#[allow(dead_code)]
-pub const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: CipherSuite = CipherSuite {
-    id: [0xCC, 0xA8],
-    name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-    key_length: 32,
-    fixed_iv_length: 12,
-    mac_key_length: 0,
-    hash_algorithm: HashAlgorithm::Sha256,
-};
-
-#[allow(dead_code)]
-pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<&'static CipherSuite> {
-    if id == &TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.id {
-        Some(&TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
-    } else if id == &TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384.id {
-        Some(&TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)
-    } else if id == &TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256.id {
-        Some(&TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256)
-    } else {
-        None
-    }
-}
+// ============================================================================
+// CIPHER SUITE FUNCTIONS
+// ============================================================================
 
 pub fn get_cipher_suite_name(suite: &[u8; 2]) -> String {
     match suite {
+        // TLS 1.3 cipher suites
         [0x13, 0x01] => "TLS_AES_128_GCM_SHA256".to_string(),
         [0x13, 0x02] => "TLS_AES_256_GCM_SHA384".to_string(),
         [0x13, 0x03] => "TLS_CHACHA20_POLY1305_SHA256".to_string(),
-        // Add more
+        [0x13, 0x04] => "TLS_AES_128_CCM_SHA256".to_string(),
+        [0x13, 0x05] => "TLS_AES_128_CCM_8_SHA256".to_string(),
+
+        // TLS 1.2 ECDHE GCM cipher suites (modern, A+ grade)
+        [0xc0, 0x2f] => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        [0xc0, 0x30] => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        [0xc0, 0x2b] => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_string(),
+        [0xc0, 0x2c] => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384".to_string(),
+        [0xcc, 0xa8] => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
+        [0xcc, 0xa9] => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".to_string(),
+
+        // TLS 1.2 ECDHE CBC cipher suites (good, A grade)
+        [0xc0, 0x27] => "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256".to_string(),
+        [0xc0, 0x28] => "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384".to_string(),
+        [0xc0, 0x23] => "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256".to_string(),
+        [0xc0, 0x24] => "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384".to_string(),
+        [0xc0, 0x13] => "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA".to_string(),
+        [0xc0, 0x14] => "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA".to_string(),
+        [0xc0, 0x09] => "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA".to_string(),
+        [0xc0, 0x0a] => "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA".to_string(),
+
+        // DHE cipher suites (B grade - PFS but slower)
+        [0x00, 0x9e] => "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        [0x00, 0x9f] => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        [0x00, 0x67] => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256".to_string(),
+        [0x00, 0x6b] => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256".to_string(),
+        [0x00, 0x33] => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA".to_string(),
+        [0x00, 0x39] => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA".to_string(),
+
+        // RSA cipher suites (C/D grade - no PFS)
+        [0x00, 0x9c] => "TLS_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        [0x00, 0x9d] => "TLS_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        [0x00, 0x3c] => "TLS_RSA_WITH_AES_128_CBC_SHA256".to_string(),
+        [0x00, 0x3d] => "TLS_RSA_WITH_AES_256_CBC_SHA256".to_string(),
+        [0x00, 0x2f] => "TLS_RSA_WITH_AES_128_CBC_SHA".to_string(),
+        [0x00, 0x35] => "TLS_RSA_WITH_AES_256_CBC_SHA".to_string(),
+
+        // Fallback for unknown cipher suites
         _ => format!("Unknown ({:02x}{:02x})", suite[0], suite[1]),
     }
 }
 
-#[allow(dead_code)]
-pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
-    if payload.len() < 2 {
-        return Err(TlsParserError::MalformedMessage(
-            "Alert payload too short".to_string(),
-        ));
+pub fn get_cipher_suite_by_id(id: &[u8; 2]) -> Option<CipherSuite> {
+    match *id {
+        // TLS 1.3 cipher suites
+        [0x13, 0x01] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_AES_128_GCM_SHA256",
+            key_length: 16,
+            fixed_iv_length: 12,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha256,
+        }),
+        [0x13, 0x02] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_AES_256_GCM_SHA384",
+            key_length: 32,
+            fixed_iv_length: 12,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha384,
+        }),
+        [0x13, 0x03] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_CHACHA20_POLY1305_SHA256",
+            key_length: 32,
+            fixed_iv_length: 12,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha256,
+        }),
+
+        // TLS 1.2 ECDHE cipher suites
+        [0xc0, 0x2f] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            key_length: 16,
+            fixed_iv_length: 4,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha256,
+        }),
+        [0xc0, 0x30] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            key_length: 32,
+            fixed_iv_length: 4,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha384,
+        }),
+        [0xc0, 0x2b] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            key_length: 16,
+            fixed_iv_length: 4,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha256,
+        }),
+        [0xc0, 0x2c] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            key_length: 32,
+            fixed_iv_length: 4,
+            mac_key_length: 0,
+            hash_algorithm: HashAlgorithm::Sha384,
+        }),
+        [0xcc, 0xa8] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+            key_length: 32,
+            fixed_iv_length: 4, // ← Add this missing field
+            mac_key_length: 0,  // ChaCha20-Poly1305 is AEAD, no separate MAC
+            hash_algorithm: HashAlgorithm::Sha256,
+        }),
+        [0xcc, 0xa9] => Some(CipherSuite {
+            id: *id,
+            name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            key_length: 32,
+            fixed_iv_length: 4, // ← Add this missing field
+            mac_key_length: 0,  // ChaCha20-Poly1305 is AEAD, no separate MAC
+            hash_algorithm: HashAlgorithm::Sha256,
+        }),
+        // Add more as needed...
+        _ => None,
     }
-
-    let level = payload[0];
-    let description = payload[1];
-
-    Ok(TlsAlert::new(level, description))
 }
 
-// =========================
-// TLS Parsing Functions
-// =========================
-// --- TLS Record Parsing ---
-#[allow(dead_code)]
+// ============================================================================
+// SIGNATURE ALGORITHM FUNCTIONS
+// ============================================================================
+
+pub fn parse_signature_algorithm(sig_alg: &[u8; 2]) -> Result<String, TlsError> {
+    match sig_alg {
+        [0x08, 0x04] => Ok("rsa_pss_rsae_sha256".to_string()),
+        [0x08, 0x05] => Ok("rsa_pss_rsae_sha384".to_string()),
+        [0x08, 0x06] => Ok("rsa_pss_rsae_sha512".to_string()),
+        [0x08, 0x09] => Ok("rsa_pss_pss_sha256".to_string()),
+        [0x08, 0x0a] => Ok("rsa_pss_pss_sha384".to_string()),
+        [0x08, 0x0b] => Ok("rsa_pss_pss_sha512".to_string()),
+        [0x04, 0x03] => Ok("ecdsa_secp256r1_sha256".to_string()),
+        [0x04, 0x01] => Ok("rsa_pkcs1_sha256".to_string()),
+        [0x05, 0x01] => Ok("rsa_pkcs1_sha384".to_string()),
+        [0x06, 0x01] => Ok("rsa_pkcs1_sha512".to_string()),
+        _ => Err(TlsError::HandshakeFailed(format!(
+            "Unsupported signature algorithm: 0x{:02x}{:02x}",
+            sig_alg[0], sig_alg[1]
+        ))),
+    }
+}
+
+// =============
+// PARSING
+
 pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>, TlsError> {
     let current_pos = reader.position() as usize;
     let remaining_len = reader.get_ref().len() - current_pos;
 
     if remaining_len < 5 {
-        // 1 byte type + 2 bytes version + 2 bytes length
         return Ok(None);
     }
 
@@ -604,8 +654,8 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     let length = reader.read_u16::<BigEndian>()?;
 
     if remaining_len < 5 + length as usize {
-        reader.set_position(current_pos as u64); // Rewind cursor
-        return Ok(None); // Return Ok(None) to indicate more data is needed
+        reader.set_position(current_pos as u64);
+        return Ok(None);
     }
 
     let mut payload = vec![0u8; length as usize];
@@ -614,7 +664,7 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     Ok(Some(TlsRecord {
         content_type: TlsContentType::try_from_u8(content_type_byte).ok_or(
             TlsError::ParserError(TlsParserError::InvalidContentType(content_type_byte)),
-        )?, // Map to TlsError here
+        )?,
         version_major,
         version_minor,
         length,
@@ -629,7 +679,6 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
     while (cursor.position() as usize) < data.len() {
         let start_pos = cursor.position() as usize;
 
-        // Ensure there are enough bytes for handshake header (1 type + 3 length)
         if data.len() - start_pos < 4 {
             return Err(TlsError::ParserError(TlsParserError::Incomplete {
                 expected: 4,
@@ -638,11 +687,33 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
         }
 
         let msg_type_byte = cursor.read_u8()?;
+
+        // Handle TLS 1.3 encrypted handshake messages
+        // After ServerHello (0x02), subsequent messages are encrypted
+        if msg_type_byte > 0x18 || (msg_type_byte == 0x07) || (msg_type_byte == 0x70) {
+            // This looks like encrypted data, not a valid handshake message
+            // In TLS 1.3, we can't parse encrypted handshake messages without decryption
+            println!(
+                "[DEBUG] Encountered encrypted handshake data (type: 0x{:02X}), stopping parsing",
+                msg_type_byte
+            );
+            break;
+        }
+
         let msg_type = HandshakeMessageType::try_from_u8(msg_type_byte).ok_or(
             TlsError::ParserError(TlsParserError::InvalidHandshakeType(msg_type_byte)),
         )?;
 
-        let length = cursor.read_u24::<BigEndian>()?; // Changed to read_u24 for 3-byte length
+        let length = cursor.read_u24::<BigEndian>()?;
+
+        // Sanity check for unreasonably large lengths (likely encrypted data)
+        if length > 65536 {
+            println!(
+                "[DEBUG] Unreasonably large handshake message length: {}, likely encrypted data",
+                length
+            );
+            break;
+        }
 
         if (cursor.position() as usize) + length as usize > data.len() {
             return Err(TlsError::ParserError(TlsParserError::Incomplete {
@@ -667,125 +738,126 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
     Ok(messages)
 }
 
-// --- TLS 1.2 ServerHello Parsing ---
-#[allow(dead_code)]
+pub fn parse_tls_extension(cursor: &mut Cursor<&[u8]>) -> Result<Extension, TlsParserError> {
+    let initial_pos = cursor.position() as usize;
+    let remaining_bytes = cursor.get_ref().len() - initial_pos;
+
+    if remaining_bytes < 4 {
+        return Err(TlsParserError::Incomplete {
+            expected: 4,
+            actual: remaining_bytes,
+        });
+    }
+
+    let ext_type_bytes = &cursor.get_ref()[initial_pos..initial_pos + 2];
+    let ext_type = u16::from_be_bytes([ext_type_bytes[0], ext_type_bytes[1]]);
+    cursor.set_position((initial_pos + 2) as u64);
+
+    let ext_len_bytes = &cursor.get_ref()[initial_pos + 2..initial_pos + 4];
+    let ext_len = u16::from_be_bytes([ext_len_bytes[0], ext_len_bytes[1]]) as usize;
+    cursor.set_position((initial_pos + 4) as u64);
+
+    if remaining_bytes < 4 + ext_len {
+        return Err(TlsParserError::Incomplete {
+            expected: 4 + ext_len,
+            actual: remaining_bytes,
+        });
+    }
+
+    let mut payload_bytes = vec![0u8; ext_len];
+    cursor
+        .read_exact(&mut payload_bytes)
+        .map_err(|_| TlsParserError::InvalidLength)?;
+
+    Ok(Extension {
+        extension_type: ext_type,
+        payload: payload_bytes,
+    })
+}
+
 pub fn parse_server_hello_content(payload: &[u8]) -> Result<ServerHelloParsed, TlsParserError> {
-    // ...existing code...
     let mut cursor = Cursor::new(payload);
 
-    // 1. Version
+    // Version (2 bytes)
     if payload.len() < 2 {
-        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let negotiated_tls_version = (cursor.get_ref()[0], cursor.get_ref()[1]);
-    // ...existing code...
     cursor.set_position(2);
 
-    // 2. Server random
+    // Server random (32 bytes)
     if payload.len() < 34 {
         return Err(TlsParserError::MalformedServerHello);
     }
     let mut server_random = [0u8; 32];
     server_random.copy_from_slice(&cursor.get_ref()[2..34]);
-    // ...existing code...
     cursor.set_position(34);
 
-    // 3. Session ID
+    // Session ID
     if cursor.position() as usize >= payload.len() {
-        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let session_id_len = cursor.get_ref()[cursor.position() as usize] as usize;
-    // ...existing code...
     cursor.set_position(cursor.position() + 1);
 
     if cursor.position() as usize + session_id_len > payload.len() {
-        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
-    let _session_id =
-        &cursor.get_ref()[cursor.position() as usize..cursor.position() as usize + session_id_len];
-    // ...existing code...
     cursor.set_position(cursor.position() + session_id_len as u64);
 
-    // 4. Cipher suite
+    // Cipher suite (2 bytes)
     if cursor.position() as usize + 2 > payload.len() {
-        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
     let chosen_cipher_suite = [
         cursor.get_ref()[cursor.position() as usize],
         cursor.get_ref()[cursor.position() as usize + 1],
     ];
-    // ...existing code...
     cursor.set_position(cursor.position() + 2);
 
-    // 5. Compression method
+    // Compression method (1 byte)
     if cursor.position() as usize >= payload.len() {
-        // ...existing code...
         return Err(TlsParserError::MalformedServerHello);
     }
-    let _compression_method = cursor.get_ref()[cursor.position() as usize];
-    // ...existing code...
     cursor.set_position(cursor.position() + 1);
 
-    // 6. Extensions
-    if cursor.position() as usize + 2 > payload.len() {
-        // ...existing code...
-        return Err(TlsParserError::MalformedServerHello);
-    }
-    let extensions_len = (cursor.get_ref()[cursor.position() as usize] as usize) << 8
-        | (cursor.get_ref()[cursor.position() as usize + 1] as usize);
-    // ...existing code...
-    cursor.set_position(cursor.position() + 2);
-
-    if cursor.position() as usize + extensions_len > payload.len() {
-        // ...existing code...
-        return Err(TlsParserError::MalformedServerHello);
-    }
-    let extensions =
-        &cursor.get_ref()[cursor.position() as usize..cursor.position() as usize + extensions_len];
-    // ...existing code...
-    // Parse extensions
-    let mut ext_cursor = Cursor::new(extensions);
+    // Extensions (optional)
     let mut server_key_share_public = None;
-    while (ext_cursor.position() as usize) + 4 <= extensions_len {
-        let ext_type = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]);
-        let ext_len = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]) as usize;
-        // ...existing code...
-        std::io::stdout().flush().unwrap();
-        if (ext_cursor.position() as usize) + ext_len > extensions_len {
-            // ...existing code...
-            std::io::stdout().flush().unwrap();
-            break;
-        }
-        let mut ext_data = vec![0u8; ext_len];
-        ext_cursor.read_exact(&mut ext_data)?;
-        // ...existing code...
-        std::io::stdout().flush().unwrap();
-        // Key Share extension (0x0033)
-        if ext_type == 0x0033 {
-            if ext_len >= 4 {
-                let _group = u16::from_be_bytes([ext_data[0], ext_data[1]]);
-                let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
-                // ...existing code...
-                std::io::stdout().flush().unwrap();
-                if ext_len >= 4 + key_len {
-                    let key = &ext_data[4..4 + key_len];
-                    // ...existing code...
-                    std::io::stdout().flush().unwrap();
-                    server_key_share_public = Some(key.to_vec());
-                } else {
-                    // Debug output removed
-                    std::io::stdout().flush().unwrap();
+    if cursor.position() as usize + 2 <= payload.len() {
+        let extensions_len = (cursor.get_ref()[cursor.position() as usize] as usize) << 8
+            | (cursor.get_ref()[cursor.position() as usize + 1] as usize);
+        cursor.set_position(cursor.position() + 2);
+
+        if cursor.position() as usize + extensions_len <= payload.len() {
+            let extensions_start = cursor.position() as usize;
+            let extensions_data =
+                &cursor.get_ref()[extensions_start..extensions_start + extensions_len];
+            let mut ext_cursor = Cursor::new(extensions_data);
+
+            while (ext_cursor.position() as usize) + 4 <= extensions_len {
+                let ext_type = u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]);
+                let ext_len =
+                    u16::from_be_bytes([ext_cursor.read_u8()?, ext_cursor.read_u8()?]) as usize;
+
+                if (ext_cursor.position() as usize) + ext_len > extensions_len {
+                    break;
                 }
-            } else {
-                // Debug output removed
-                std::io::stdout().flush().unwrap();
+
+                let mut ext_data = vec![0u8; ext_len];
+                ext_cursor.read_exact(&mut ext_data)?;
+
+                // Parse Key Share extension (0x0033)
+                if ext_type == 0x0033 && ext_len >= 4 {
+                    let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
+                    if ext_len >= 4 + key_len {
+                        let key = &ext_data[4..4 + key_len];
+                        server_key_share_public = Some(key.to_vec());
+                    }
+                }
             }
         }
     }
+
     Ok(ServerHelloParsed {
         negotiated_tls_version,
         server_random,
@@ -840,33 +912,36 @@ pub fn parse_certificate_list(payload: &[u8]) -> Result<Vec<Vec<u8>>, TlsParserE
     Ok(certificates)
 }
 
-#[allow(dead_code)]
 pub fn parse_server_key_exchange_content(
     payload: &[u8],
 ) -> Result<ServerKeyExchangeParsed, TlsParserError> {
-    // ...existing code...
-
-    //cursor is used to read the payload byte-by-byte
     let mut cursor = Cursor::new(payload);
-    let start_params = 0; //start of the params
-    let curve_type = cursor.read_u8()?; //read the curve type should be 0x03 for P-256 ECDHE
+    let start_params = 0;
+
+    let curve_type = cursor.read_u8()?;
     if curve_type != 0x03 {
         return Err(TlsParserError::InvalidNamedGroup(curve_type as u16));
     }
+
     let named_curve = cursor.read_u16::<BigEndian>()?;
     if NamedGroup::try_from_u16(named_curve).is_none() {
         return Err(TlsParserError::InvalidNamedGroup(named_curve));
     }
-    let public_key_len = cursor.read_u8()? as usize; // read the length of the public key
+
+    let public_key_len = cursor.read_u8()? as usize;
     let mut public_key_bytes = vec![0; public_key_len];
     cursor.read_exact(&mut public_key_bytes)?;
+
     let end_params = cursor.position() as usize;
-    let params_raw = payload[start_params..end_params].to_vec(); //get the raw bytes from the start to the end of the params
-    let mut signature_algorithm = [0; 2]; //read the signature algorithm
+    let params_raw = payload[start_params..end_params].to_vec();
+
+    let mut signature_algorithm = [0; 2];
     cursor.read_exact(&mut signature_algorithm)?;
-    let signature_len = cursor.read_u16::<BigEndian>()? as usize; //read the length of the signature
-    let mut signature_bytes = vec![0; signature_len]; //create a vector to store the signature
+
+    let signature_len = cursor.read_u16::<BigEndian>()? as usize;
+    let mut signature_bytes = vec![0; signature_len];
     cursor.read_exact(&mut signature_bytes)?;
+
     if cursor.position() as usize != payload.len() {
         return Err(TlsParserError::MalformedMessage(
             "ServerKeyExchange payload has unread trailing data".to_string(),
@@ -883,8 +958,6 @@ pub fn parse_server_key_exchange_content(
     })
 }
 
-// --- TLS 1.3 ServerHello Parsing ---
-/// Parses the payload of a TLS 1.3 ServerHello message.
 pub fn parse_tls13_server_hello_payload(
     payload: &[u8],
 ) -> Result<ServerHello13Parsed, TlsParserError> {
@@ -903,7 +976,7 @@ pub fn parse_tls13_server_hello_payload(
     }
     cursor.read_exact(&mut parsed_sh.server_random)?;
 
-    // Session ID Length (1 byte) and Session ID
+    // Session ID
     if cursor.position() as usize >= payload.len() {
         return Err(TlsParserError::MalformedServerHello);
     }
@@ -941,16 +1014,15 @@ pub fn parse_tls13_server_hello_payload(
         let mut ext_cursor = Cursor::new(extensions_data_slice);
 
         while (ext_cursor.position() as usize) < extensions_len {
-            let extension = parse_tls_extension(&mut ext_cursor)?; // Reusing the generic extension parser
+            let extension = parse_tls_extension(&mut ext_cursor)?;
             parsed_sh.extensions.push(extension);
         }
-        cursor.set_position(cursor.position() + extensions_len as u64); // Advance main cursor past extensions
+        cursor.set_position(cursor.position() + extensions_len as u64);
     } else if (cursor.position() as usize) < payload.len() {
-        // If there are remaining bytes but not enough for an extensions_len field, it's malformed.
         return Err(TlsParserError::MalformedServerHello);
     }
 
-    // Now, process parsed extensions to populate specific TLS 1.3 fields
+    // Process parsed extensions
     for ext in &parsed_sh.extensions {
         match ext.extension_type {
             EXTENSION_TYPE_SUPPORTED_VERSIONS => {
@@ -973,10 +1045,7 @@ pub fn parse_tls13_server_hello_payload(
                     }
                 }
             }
-            // ...other TLS 1.3 ServerHello extensions...
-            _ => {
-                // ...existing code...
-            }
+            _ => {}
         }
     }
 
@@ -988,31 +1057,15 @@ pub fn parse_tls13_server_hello_payload(
     Ok(parsed_sh)
 }
 
-// --- TLS 1.3 EncryptedExtensions Parsing ---
-#[allow(dead_code)]
-pub fn parse_tls13_encrypted_extensions_payload(
-    payload: &[u8],
-) -> Result<Vec<Extension>, TlsParserError> {
-    use byteorder::{BigEndian, ReadBytesExt};
-    use std::io::Cursor;
-
-    let mut cursor = Cursor::new(payload);
+pub fn parse_tls_alert(payload: &[u8]) -> Result<TlsAlert, TlsParserError> {
     if payload.len() < 2 {
         return Err(TlsParserError::MalformedMessage(
-            "EncryptedExtensions payload too short for extensions length".to_string(),
+            "Alert payload too short".to_string(),
         ));
     }
-    let extensions_len = cursor.read_u16::<BigEndian>()? as usize;
-    if payload.len() < 2 + extensions_len {
-        return Err(TlsParserError::MalformedMessage(
-            "EncryptedExtensions extensions data out of bounds".to_string(),
-        ));
-    }
-    let mut extensions = Vec::new();
-    let mut ext_cursor = Cursor::new(&payload[2..2 + extensions_len]);
-    while (ext_cursor.position() as usize) < extensions_len {
-        let extension = parse_tls_extension(&mut ext_cursor)?;
-        extensions.push(extension);
-    }
-    Ok(extensions)
+
+    let level = payload[0];
+    let description = payload[1];
+
+    Ok(TlsAlert::new(level, description))
 }

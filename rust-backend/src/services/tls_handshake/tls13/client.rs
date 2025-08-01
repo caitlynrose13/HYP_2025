@@ -13,7 +13,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use std::io::Write;
 use std::net::TcpStream;
 
-// ============================================================================
+// =================
 // CONNECTION STATE
 
 #[allow(dead_code)]
@@ -30,9 +30,8 @@ pub struct Tls13ConnectionState {
     pub transcript_hash: Vec<u8>,
 }
 
-// ============================================================================
+// ====================================
 // PUBLIC API
-// ============================================================================
 
 pub fn perform_tls13_handshake_full(domain: &str) -> Result<Tls13ConnectionState, TlsError> {
     perform_tls13_handshake_full_with_cert(domain).map(|(state, _)| state)
@@ -216,12 +215,12 @@ fn process_encrypted_handshake(
     cipher_suite_obj: &CipherSuite,
     transcript: &mut TranscriptHash,
 ) -> Result<Option<Vec<u8>>, TlsError> {
-    let dummy_app_secret = vec![0u8; server_hs_traffic_secret.len()];
+    let empty_app_secret = Vec::new();
 
     let decrypted_records = process_encrypted_handshake_records(
         stream,
         server_hs_traffic_secret,
-        &dummy_app_secret,
+        &empty_app_secret,
         cipher_suite_obj,
         transcript,
     )?;
