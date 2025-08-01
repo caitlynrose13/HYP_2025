@@ -1,4 +1,59 @@
+use chrono::{NaiveDateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::net::TcpStream;
+
+// Import types from assessment_handler
+use crate::handlers::assessment_handler::{
+    CertificateInfo, CipherSuiteInfo, KeyExchangeInfo, ProtocolSupport, VulnerabilityInfo,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Grade {
+    APlus,
+    A,
+    AMinus,
+    B,
+    C,
+    F,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GradeInput {
+    pub tls13_supported: bool,
+    pub tls12_supported: bool,
+    pub tls11_supported: bool,
+    pub tls10_supported: bool,
+    pub cipher_is_strong: bool,
+    pub cert_valid: bool,
+    pub cert_expired: bool,
+    pub cert_key_strength_ok: bool,
+    pub hsts: bool,
+    pub forward_secrecy: bool,
+    pub weak_protocols_disabled: bool,
+    pub ocsp_stapling_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedScan {
+    pub domain: String,
+    pub grade: Grade,
+    pub details: GradeInput,
+    pub certificate: CertificateInfo,
+    pub protocols: ProtocolSupport,
+    pub cipher_suites: CipherSuiteInfo,
+    pub vulnerabilities: VulnerabilityInfo,
+    pub key_exchange: KeyExchangeInfo,
+    pub whois: Option<WhoisInfo>,
+    pub explanation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoisInfo {
+    pub creation_date: Option<NaiveDateTime>,
+    pub registrar: Option<String>,
+    pub raw: String,
+}
 
 /// Queries the WHOIS server for a given domain and returns the raw response.
 /// Only works for .com/.net domains (whois.verisign-grs.com).
@@ -44,131 +99,12 @@ pub fn whois_query(domain: &str) -> Result<String, String> {
     Ok(response)
 }
 
-// Example usage in your workflow:
-// let whois_resp = whois_query("example.com").ok();
-// let (grade, cached) = get_or_run_scan(
-//     domain,
-//     &input,
-//     &certificate,
-//     &protocols,
-//     &cipher_suites,
-//     &vulnerabilities,
-//     &key_exchange,
-//     whois_resp.as_deref(),
-// );
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Grade {
-    APlus,
-    A,
-    AMinus,
-    B,
-    C,
-    F,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GradeInput {
-    pub tls13_supported: bool,
-    pub tls12_supported: bool,
-    pub tls11_supported: bool,
-    pub tls10_supported: bool,
-    pub cipher_is_strong: bool,
-    pub cert_valid: bool,
-    pub hsts: bool,
-    pub forward_secrecy: bool,
-    pub weak_protocols_disabled: bool, // TLS 1.0/1.1 disabled
-}
-
-pub fn grade_site(input: &GradeInput) -> Grade {
-    // F - No TLS 1.2 or 1.3 support, or weak protocols (SSL Labs: F)
-    if !input.tls12_supported || !input.tls13_supported {
-        // If either TLS 1.2 or TLS 1.3 fails, treat as supporting weak protocols
-        return Grade::F;
-    }
-    if input.tls10_supported || input.tls11_supported {
-        return Grade::F;
-    }
-
-    // C - Certificate issues (expired, invalid, etc.)
-    if !input.cert_valid {
-        return Grade::C;
-    }
-
-    // B - Weak cipher suites or no forward secrecy
-    if !input.cipher_is_strong || !input.forward_secrecy {
-        return Grade::B;
-    }
-
-    // A+ - TLS 1.3 + HSTS + strong ciphers + forward secrecy
-    if input.tls13_supported
-        && input.hsts
-        && input.tls12_supported
-        && input.cipher_is_strong
-        && input.forward_secrecy
-    {
-        return Grade::APlus;
-    }
-
-    // A - TLS 1.3 supported with strong security features
-    if input.tls13_supported
-        && input.tls12_supported
-        && input.cipher_is_strong
-        && input.forward_secrecy
-    {
-        return Grade::A;
-    }
-
-    // A- - Only TLS 1.2 but with excellent security (strong ciphers, forward secrecy)
-    if input.tls12_supported && input.cipher_is_strong && input.cert_valid && input.forward_secrecy
-    {
-        return Grade::AMinus;
-    }
-
-    // B - TLS 1.2 with some security features
-    if input.tls12_supported && input.cert_valid {
-        return Grade::B;
-    }
-
-    Grade::F
-}
-use crate::handlers::assessment_handler::{
-    CertificateInfo, CipherSuiteInfo, KeyExchangeInfo, ProtocolSupport, VulnerabilityInfo,
-};
-use chrono::{NaiveDateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::Path;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedScan {
-    pub domain: String,
-    pub grade: Grade,
-    pub details: GradeInput,
-    pub certificate: CertificateInfo,
-    pub protocols: ProtocolSupport,
-    pub cipher_suites: CipherSuiteInfo,
-    pub vulnerabilities: VulnerabilityInfo,
-    pub key_exchange: KeyExchangeInfo,
-    pub whois: Option<WhoisInfo>,
-    pub explanation: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WhoisInfo {
-    pub creation_date: Option<NaiveDateTime>,
-    pub registrar: Option<String>,
-    pub raw: String,
-}
-
 /// Parses WHOIS response for creation date and registrar (simple version)
 pub fn parse_whois_response(response: &str) -> WhoisInfo {
     let mut creation_date = None;
     let mut registrar = None;
     for line in response.lines() {
         if line.to_lowercase().contains("creation date") {
-            // Example: Creation Date: 2020-01-01T12:34:56Z
             if let Some(idx) = line.find(":") {
                 let date_str = line[idx + 1..].trim();
                 if let Ok(dt) = NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%SZ") {
@@ -192,6 +128,84 @@ pub fn parse_whois_response(response: &str) -> WhoisInfo {
     }
 }
 
+/// Returns a technical grade and explanation based on SSL Labs-like logic.
+pub fn grade_site(input: &GradeInput, certificate: &CertificateInfo) -> (Grade, Vec<String>) {
+    let mut score = 100;
+    let mut reasons = Vec::new();
+
+    // TLS/SSL Protocol and Version
+    if !input.tls13_supported {
+        score -= 10;
+        reasons.push("Does not support TLS 1.3.".to_string());
+    }
+    if !input.tls12_supported {
+        score = 0;
+        reasons.push("Does not support TLS 1.2 or higher.".to_string());
+        return (Grade::F, reasons);
+    }
+    if input.tls10_supported || input.tls11_supported {
+        score -= 20;
+        reasons.push("Supports obsolete TLS 1.0 or 1.1.".to_string());
+    }
+    if !input.weak_protocols_disabled {
+        score -= 5;
+        reasons.push("Weak protocols (TLS 1.0/1.1) not explicitly disabled.".to_string());
+    }
+
+    // Certificate Details
+    if !input.cert_valid {
+        score = 0;
+        reasons.push("Certificate is invalid.".to_string());
+        return (Grade::F, reasons);
+    } else if input.cert_expired {
+        score = 0;
+        reasons.push("Certificate is expired.".to_string());
+        return (Grade::F, reasons);
+    }
+    if !input.cert_key_strength_ok {
+        score -= 15;
+        reasons.push("Certificate uses a weak key (e.g., < 2048-bit).".to_string());
+    }
+
+    // Cipher Suite
+    if !input.cipher_is_strong {
+        score -= 25;
+        reasons.push("Uses a weak or non-recommended cipher suite.".to_string());
+    }
+
+    // Additional Security Headers and Features
+    if !input.hsts {
+        score -= 10;
+        reasons.push("HTTP Strict Transport Security (HSTS) is not enabled.".to_string());
+    }
+    if !input.forward_secrecy {
+        score -= 15;
+        reasons.push("Perfect Forward Secrecy is not enabled.".to_string());
+    }
+    if !input.ocsp_stapling_enabled {
+        score -= 5;
+        reasons.push("OCSP Stapling is not enabled.".to_string());
+    }
+
+    // Final grade mapping
+    let grade = if score >= 95 {
+        Grade::APlus
+    } else if score >= 85 {
+        Grade::A
+    } else if score >= 70 {
+        Grade::AMinus
+    } else if score >= 50 {
+        Grade::B
+    } else if score >= 20 {
+        Grade::C
+    } else {
+        Grade::F
+    };
+
+    (grade, reasons)
+}
+
+/// Combines technical grade with WHOIS-based downgrades and explanations.
 pub fn get_or_run_scan(
     domain: &str,
     input: &GradeInput,
@@ -205,7 +219,7 @@ pub fn get_or_run_scan(
     let whois_info = whois_response.map(|resp| parse_whois_response(resp));
 
     println!("[DEBUG] Grading input for domain {}: {:?}", domain, input);
-    let mut grade = grade_site(input);
+    let (mut grade, mut reasons) = grade_site(input, certificate);
     let mut explanation = None;
 
     // WHOIS-based downgrade: if domain is younger than 30 days, downgrade to F
@@ -255,19 +269,6 @@ pub fn get_or_run_scan(
         }
         if !reasons.is_empty() {
             explanation = Some(reasons.join(" "));
-        }
-    }
-
-    // Calculate actual certificate expiry if possible
-    let mut cert_expiry_days = None;
-    if let Some(valid_to) = &certificate.valid_to {
-        // Try RFC3339, then common formats
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ") {
-            let now = chrono::Utc::now().naive_utc();
-            cert_expiry_days = Some((dt - now).num_days());
-        } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
-            let now = chrono::Utc::now().date_naive();
-            cert_expiry_days = Some((date - now).num_days());
         }
     }
     (grade, explanation)

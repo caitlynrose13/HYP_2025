@@ -169,9 +169,12 @@ pub async fn assess_domain(
         tls10_supported: false,
         cipher_is_strong: false,
         cert_valid: false,
+        cert_expired: false,
+        cert_key_strength_ok: false,
         hsts: hsts_supported,
         forward_secrecy: false,
         weak_protocols_disabled: true,
+        ocsp_stapling_enabled: false,
     };
 
     // WHOIS integration: fetch WHOIS and pass to grading

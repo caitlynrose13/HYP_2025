@@ -58,9 +58,6 @@ pub fn perform_tls13_handshake_minimal(
     };
 
     let client_hello = build_client_hello(domain, &client_random, &client_public_bytes);
-    use crate::services::tls_handshake::tls13::messages::build_raw_client_hello_handshake;
-    let _raw_client_hello =
-        build_raw_client_hello_handshake(domain, &client_random, &client_public_bytes);
     let mut stream =
         TcpStream::connect((domain, 443)).map_err(|e| TlsError::ConnectionFailed(e.to_string()))?;
     stream
@@ -136,131 +133,41 @@ pub fn perform_tls13_handshake_minimal(
             hash_alg.clone(),
         )?;
 
-    let cipher_suite_obj = CipherSuite::new(negotiated_cipher_suite[0], negotiated_cipher_suite[1]);
-
     let dummy_app_secret = vec![0u8; server_hs_traffic_secret.len()];
 
-    let _decrypted_records = process_encrypted_handshake_records(
+    let decrypted_records = process_encrypted_handshake_records(
         &mut stream,
         &server_hs_traffic_secret,
-        &dummy_app_secret, // Dummy value - handshake phase uses HS secrets only
+        &dummy_app_secret,
         &cipher_suite_obj,
         &mut transcript,
     )?;
 
-    use crate::services::tls_handshake::tls13::key_schedule::derive_tls13_application_traffic_secrets;
-    let (_client_app_traffic_secret, server_app_traffic_secret) =
-        derive_tls13_application_traffic_secrets(&shared_secret, &transcript, hash_alg.clone())?;
+    // Extract certificate bytes from the DECRYPTED handshake records
+    let mut server_certificate: Option<Vec<u8>> = None;
+    for (i, record) in decrypted_records.iter().enumerate() {
+        if let Ok(msgs) = parse_handshake_messages(&record.payload) {
+            for (j, msg) in msgs.iter().enumerate() {
+                if msg.msg_type == HandshakeMessageType::Certificate {
+                    // Extract the first certificate manually
+                    if msg.raw_bytes.len() > 3 {
+                        let cert_len = u32::from_be_bytes([
+                            0,
+                            msg.raw_bytes[1],
+                            msg.raw_bytes[2],
+                            msg.raw_bytes[3],
+                        ]) as usize;
 
-    use crate::services::tls_handshake::tls13::record_layer::decrypt_record;
-
-    let mut handshake_sequence_number = 0u64; // Start from 0 for first encrypted record
-
-    for _attempt in 0..3 {
-        match read_tls_record(&mut stream) {
-            Ok(record) => {
-                match record.content_type {
-                    crate::services::tls_parser::TlsContentType::ApplicationData => {
-                        // Try different sequence numbers in case we're off
-                        for seq_attempt in 0..5 {
-                            let try_seq = handshake_sequence_number + seq_attempt;
-                            println!("[DEBUG] Trying sequence number: {}", try_seq);
-
-                            match decrypt_record(
-                                &record.payload,
-                                &server_hs_traffic_secret,
-                                &server_app_traffic_secret,
-                                try_seq,
-                                0x17, // ApplicationData record type
-                                record.version_major,
-                                record.version_minor,
-                                record.length,
-                                &cipher_suite_obj,
-                            ) {
-                                Ok(decrypted) => {
-                                    println!(
-                                        "[SUCCESS] Decrypted {} bytes with sequence {}",
-                                        decrypted.len(),
-                                        try_seq
-                                    );
-                                    if !decrypted.is_empty() {
-                                        println!(
-                                            "[DEBUG] Decrypted content: {:02x?}",
-                                            &decrypted[..std::cmp::min(64, decrypted.len())]
-                                        );
-                                    }
-                                    handshake_sequence_number = try_seq + 1;
-                                    break;
-                                }
-                                Err(e) => {
-                                    if seq_attempt == 4 {
-                                        eprintln!(
-                                            "[ERROR] Failed to decrypt with all sequence attempts: {:?}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
+                        if msg.raw_bytes.len() >= cert_len + 4 {
+                            let certificate_der = msg.raw_bytes[4..cert_len + 4].to_vec();
+                            server_certificate = Some(certificate_der);
+                            break;
                         }
-                    }
-                    crate::services::tls_parser::TlsContentType::Handshake => {
-                        println!(
-                            "[DEBUG] Received post-handshake record (likely NewSessionTicket)"
-                        );
-                        // This uses application traffic secret in TLS 1.3
-                        match decrypt_record(
-                            &record.payload,
-                            &server_hs_traffic_secret,
-                            &server_app_traffic_secret, // Post-handshake messages use app secret
-                            handshake_sequence_number,
-                            0x16, // Handshake record type
-                            record.version_major,
-                            record.version_minor,
-                            record.length,
-                            &cipher_suite_obj,
-                        ) {
-                            Ok(decrypted) => {
-                                println!(
-                                    "[SUCCESS] Decrypted {} bytes of post-handshake",
-                                    decrypted.len()
-                                );
-                                if !decrypted.is_empty() {
-                                    println!(
-                                        "[DEBUG] Post-handshake content: {:02x?}",
-                                        &decrypted[..std::cmp::min(32, decrypted.len())]
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("[ERROR] Failed to decrypt post-handshake: {:?}", e);
-                            }
-                        }
-                        handshake_sequence_number += 1;
-                    }
-                    _ => {
-                        println!(
-                            "[DEBUG] Received other record type: {:?}",
-                            record.content_type
-                        );
                     }
                 }
             }
-            Err(_) => {
-                break;
-            }
         }
-    }
-
-    // Extract certificate bytes from handshake messages
-    let mut server_certificate: Option<Vec<u8>> = None;
-    for msg in handshake_messages.iter() {
-        if msg.msg_type == HandshakeMessageType::Certificate {
-            // Parse the certificate list (skip first 4 bytes if needed)
-            if let Ok(certificates) =
-                crate::services::tls_parser::parse_certificate_list(&msg.raw_bytes[4..])
-            {
-                server_certificate = certificates.get(0).cloned();
-            }
+        if server_certificate.is_some() {
             break;
         }
     }
