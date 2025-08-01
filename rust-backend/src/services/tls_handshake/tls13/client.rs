@@ -28,7 +28,14 @@ pub struct Tls13ConnectionState {
     pub client_random: [u8; 32],
     pub transcript_hash: Vec<u8>,
 }
-pub fn perform_tls13_handshake_minimal(
+
+/// Perform a full TLS 1.3 handshake and return connection state only
+pub fn perform_tls13_handshake_full(domain: &str) -> Result<Tls13ConnectionState, TlsError> {
+    perform_tls13_handshake_full_with_cert(domain).map(|(state, _)| state)
+}
+
+/// Perform a full TLS 1.3 handshake and return both connection state and certificate
+pub fn perform_tls13_handshake_full_with_cert(
     domain: &str,
 ) -> Result<(Tls13ConnectionState, Option<Vec<u8>>), TlsError> {
     let rng = SystemRandom::new();
@@ -64,7 +71,7 @@ pub fn perform_tls13_handshake_minimal(
         .write_all(&client_hello)
         .map_err(|e| TlsError::IoError(e))?;
 
-    // 3. Read ServerHello using the modular function
+    // Read ServerHello using the modular function
     let server_hello_record = read_tls_record(&mut stream)?;
 
     if server_hello_record.content_type != crate::services::tls_parser::TlsContentType::Handshake {
@@ -110,7 +117,6 @@ pub fn perform_tls13_handshake_minimal(
     let mut transcript = TranscriptHash::new(hash_alg.clone());
 
     transcript.update(&client_hello[5..]);
-
     transcript.update(&server_hello_msg.raw_bytes);
 
     // Use ring to perform X25519 key exchange
@@ -145,41 +151,30 @@ pub fn perform_tls13_handshake_minimal(
 
     // Extract certificate bytes from the DECRYPTED handshake records
     let mut server_certificate: Option<Vec<u8>> = None;
-    for (i, record) in decrypted_records.iter().enumerate() {
+    for record in decrypted_records.iter() {
         if let Ok(msgs) = parse_handshake_messages(&record.payload) {
-            for (j, msg) in msgs.iter().enumerate() {
+            for msg in msgs.iter() {
                 if msg.msg_type == HandshakeMessageType::Certificate {
-                    // Extract the first certificate manually
-                    if msg.raw_bytes.len() > 3 {
-                        let cert_len = u32::from_be_bytes([
-                            0,
-                            msg.raw_bytes[1],
-                            msg.raw_bytes[2],
-                            msg.raw_bytes[3],
-                        ]) as usize;
-
-                        if msg.raw_bytes.len() >= cert_len + 4 {
-                            let certificate_der = msg.raw_bytes[4..cert_len + 4].to_vec();
-                            server_certificate = Some(certificate_der);
-                            break;
-                        }
+                    if let Some(cert) = extract_tls13_certificate(&msg.raw_bytes) {
+                        server_certificate = Some(cert);
+                        break;
                     }
                 }
             }
-        }
-        if server_certificate.is_some() {
-            break;
+            if server_certificate.is_some() {
+                break;
+            }
         }
     }
 
     Ok((
         Tls13ConnectionState {
             client_secret: None, // ring does not expose private key bytes
-            client_public: client_public_bytes.try_into().unwrap(),
+            client_public: client_public_bytes,
             server_public,
             shared_secret,
-            client_hs_traffic_secret: client_hs_traffic_secret.clone(),
-            server_hs_traffic_secret: server_hs_traffic_secret.clone(),
+            client_hs_traffic_secret,
+            server_hs_traffic_secret,
             negotiated_cipher_suite,
             server_random,
             client_random,
@@ -191,6 +186,49 @@ pub fn perform_tls13_handshake_minimal(
     ))
 }
 
+/// Extract the first certificate from a TLS 1.3 Certificate handshake message
+fn extract_tls13_certificate(certificate_msg: &[u8]) -> Option<Vec<u8>> {
+    // TLS 1.3 Certificate message structure:
+    // Handshake header (4 bytes) + Certificate request context + Certificate list
+
+    if certificate_msg.len() <= 5 {
+        return None;
+    }
+
+    let context_len = certificate_msg[4] as usize;
+    let cert_list_start = 4 + 1 + context_len; // Skip handshake header + context length + context
+
+    if certificate_msg.len() <= cert_list_start + 3 {
+        return None;
+    }
+
+    // Certificate list length (3 bytes)
+    let cert_data_start = cert_list_start + 3;
+
+    if certificate_msg.len() <= cert_data_start + 3 {
+        return None;
+    }
+
+    // First certificate length (3 bytes)
+    let first_cert_len = u32::from_be_bytes([
+        0,
+        certificate_msg[cert_data_start],
+        certificate_msg[cert_data_start + 1],
+        certificate_msg[cert_data_start + 2],
+    ]) as usize;
+
+    let first_cert_start = cert_data_start + 3;
+    let first_cert_end = first_cert_start + first_cert_len;
+
+    if certificate_msg.len() >= first_cert_end {
+        Some(certificate_msg[first_cert_start..first_cert_end].to_vec())
+    } else {
+        None
+    }
+}
+
+/// Clean test function to perform a TLS 1.3 handshake with any domain
+/// Returns certificate if handshake succeeds, Err(TlsError) otherwise
 pub fn test_tls13(domain: &str) -> Result<Option<Vec<u8>>, TlsError> {
-    perform_tls13_handshake_minimal(domain).map(|(_state, cert)| cert)
+    perform_tls13_handshake_full_with_cert(domain).map(|(_state, cert)| cert)
 }

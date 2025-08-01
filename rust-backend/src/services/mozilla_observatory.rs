@@ -22,11 +22,6 @@ pub async fn fetch_observatory_results(domain: &str) -> Result<ObservatoryResult
         domain
     );
 
-    println!(
-        "Observatory API: Attempting to initiate scan for {}...",
-        domain
-    );
-
     let post_resp = client
         .post(&scan_start_url)
         .header("Content-Length", "0")
