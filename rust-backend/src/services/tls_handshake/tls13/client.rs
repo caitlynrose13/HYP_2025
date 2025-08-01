@@ -5,19 +5,20 @@ use crate::services::tls_handshake::tls13::handshake_processor::{
 use crate::services::tls_handshake::tls13::key_schedule::derive_tls13_handshake_traffic_secrets_dynamic;
 use crate::services::tls_handshake::tls13::messages::build_client_hello;
 use crate::services::tls_handshake::tls13::transcript::{TranscriptHash, TranscriptHashAlgorithm};
-use crate::services::tls_parser::CipherSuite;
 use crate::services::tls_parser::{
-    HandshakeMessageType, parse_handshake_messages, parse_tls13_server_hello_payload,
+    CipherSuite, HandshakeMessageType, parse_handshake_messages, parse_tls13_server_hello_payload,
 };
 use ring::agreement::{EphemeralPrivateKey, UnparsedPublicKey, X25519};
-use ring::rand::SecureRandom;
-use ring::rand::SystemRandom;
+use ring::rand::{SecureRandom, SystemRandom};
 use std::io::Write;
 use std::net::TcpStream;
 
+// ============================================================================
+// CONNECTION STATE
+
 #[allow(dead_code)]
 pub struct Tls13ConnectionState {
-    pub client_secret: Option<[u8; 32]>, // Option so we can take ownership
+    pub client_secret: Option<[u8; 32]>,
     pub client_public: [u8; 32],
     pub server_public: [u8; 32],
     pub shared_secret: [u8; 32],
@@ -29,15 +30,74 @@ pub struct Tls13ConnectionState {
     pub transcript_hash: Vec<u8>,
 }
 
-/// Perform a full TLS 1.3 handshake and return connection state only
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
 pub fn perform_tls13_handshake_full(domain: &str) -> Result<Tls13ConnectionState, TlsError> {
     perform_tls13_handshake_full_with_cert(domain).map(|(state, _)| state)
 }
 
-/// Perform a full TLS 1.3 handshake and return both connection state and certificate
+pub fn test_tls13(domain: &str) -> Result<Option<Vec<u8>>, TlsError> {
+    perform_tls13_handshake_full_with_cert(domain).map(|(_state, cert)| cert)
+}
+
+// ============================================================================
+// CORE HANDSHAKE IMPLEMENTATION
+// ============================================================================
+
 pub fn perform_tls13_handshake_full_with_cert(
     domain: &str,
 ) -> Result<(Tls13ConnectionState, Option<Vec<u8>>), TlsError> {
+    let (client_random, client_private, client_public_bytes) = generate_client_keys()?;
+    let client_hello = build_client_hello(domain, &client_random, &client_public_bytes);
+
+    let mut stream =
+        TcpStream::connect((domain, 443)).map_err(|e| TlsError::ConnectionFailed(e.to_string()))?;
+
+    stream.write_all(&client_hello).map_err(TlsError::IoError)?;
+
+    let (server_hello_msg, server_random, negotiated_cipher_suite, server_public) =
+        process_server_hello(&mut stream)?;
+
+    let cipher_suite_obj = validate_cipher_suite(negotiated_cipher_suite)?;
+    let hash_alg = get_hash_algorithm(&cipher_suite_obj);
+    let mut transcript = create_transcript(&hash_alg, &client_hello, &server_hello_msg);
+
+    let shared_secret = perform_key_exchange(client_private, &server_public)?;
+
+    let (client_hs_traffic_secret, server_hs_traffic_secret) =
+        derive_tls13_handshake_traffic_secrets_dynamic(&shared_secret, &transcript, hash_alg)?;
+
+    let server_certificate = process_encrypted_handshake(
+        &mut stream,
+        &server_hs_traffic_secret,
+        &cipher_suite_obj,
+        &mut transcript,
+    )?;
+
+    let connection_state = Tls13ConnectionState {
+        client_secret: None,
+        client_public: client_public_bytes,
+        server_public,
+        shared_secret,
+        client_hs_traffic_secret,
+        server_hs_traffic_secret,
+        negotiated_cipher_suite,
+        server_random,
+        client_random,
+        transcript_hash: transcript
+            .clone_hash()
+            .map_err(|e| TlsError::HandshakeError(e.to_string()))?,
+    };
+
+    Ok((connection_state, server_certificate))
+}
+
+// ======================================
+// HELPER FUNCTIONS
+
+fn generate_client_keys() -> Result<([u8; 32], EphemeralPrivateKey, [u8; 32]), TlsError> {
     let rng = SystemRandom::new();
     let mut client_random = [0u8; 32];
     rng.fill(&mut client_random).map_err(|e| {
@@ -64,24 +124,21 @@ pub fn perform_tls13_handshake_full_with_cert(
         arr
     };
 
-    let client_hello = build_client_hello(domain, &client_random, &client_public_bytes);
-    let mut stream =
-        TcpStream::connect((domain, 443)).map_err(|e| TlsError::ConnectionFailed(e.to_string()))?;
-    stream
-        .write_all(&client_hello)
-        .map_err(|e| TlsError::IoError(e))?;
+    Ok((client_random, client_private, client_public_bytes))
+}
 
-    // Read ServerHello using the modular function
-    let server_hello_record = read_tls_record(&mut stream)?;
+fn process_server_hello(
+    stream: &mut TcpStream,
+) -> Result<(Vec<u8>, [u8; 32], [u8; 2], [u8; 32]), TlsError> {
+    let server_hello_record = read_tls_record(stream)?;
 
     if server_hello_record.content_type != crate::services::tls_parser::TlsContentType::Handshake {
         return Err(TlsError::HandshakeError(format!(
-            "Expected Handshake record from server, got {:?} with length {}",
+            "Expected Handshake record, got {:?} with length {}",
             server_hello_record.content_type, server_hello_record.length
         )));
     }
 
-    // Parse handshake messages to find the Certificate message
     let handshake_messages = parse_handshake_messages(&server_hello_record.payload)?;
     let server_hello_msg = handshake_messages
         .get(0)
@@ -94,15 +151,21 @@ pub fn perform_tls13_handshake_full_with_cert(
     }
 
     let sh = parse_tls13_server_hello_payload(&server_hello_msg.payload)?;
-    let server_random = sh.server_random;
-    let negotiated_cipher_suite = sh.chosen_cipher_suite;
     let server_public = sh
         .server_key_share_public
-        .ok_or_else(|| TlsError::KeyDerivationError("No server key share".to_string()))?;
-    let server_public: [u8; 32] = server_public
+        .ok_or_else(|| TlsError::KeyDerivationError("No server key share".to_string()))?
         .try_into()
         .map_err(|_| TlsError::KeyExchangeError("Invalid server key length".to_string()))?;
 
+    Ok((
+        server_hello_msg.raw_bytes.clone(),
+        sh.server_random,
+        sh.chosen_cipher_suite,
+        server_public,
+    ))
+}
+
+fn validate_cipher_suite(negotiated_cipher_suite: [u8; 2]) -> Result<CipherSuite, TlsError> {
     let cipher_suite_obj = CipherSuite::new(negotiated_cipher_suite[0], negotiated_cipher_suite[1]);
     if cipher_suite_obj.id == [0x00, 0x00] {
         return Err(TlsError::UnsupportedCipherSuite(format!(
@@ -110,106 +173,95 @@ pub fn perform_tls13_handshake_full_with_cert(
             negotiated_cipher_suite[0], negotiated_cipher_suite[1]
         )));
     }
-    let hash_alg = match cipher_suite_obj.hash_algorithm {
+    Ok(cipher_suite_obj)
+}
+
+fn get_hash_algorithm(cipher_suite: &CipherSuite) -> TranscriptHashAlgorithm {
+    match cipher_suite.hash_algorithm {
         crate::services::tls_parser::HashAlgorithm::Sha256 => TranscriptHashAlgorithm::Sha256,
         crate::services::tls_parser::HashAlgorithm::Sha384 => TranscriptHashAlgorithm::Sha384,
-    };
+    }
+}
+
+fn create_transcript(
+    hash_alg: &TranscriptHashAlgorithm,
+    client_hello: &[u8],
+    server_hello_msg: &[u8],
+) -> TranscriptHash {
     let mut transcript = TranscriptHash::new(hash_alg.clone());
-
     transcript.update(&client_hello[5..]);
-    transcript.update(&server_hello_msg.raw_bytes);
+    transcript.update(server_hello_msg);
+    transcript
+}
 
-    // Use ring to perform X25519 key exchange
-    let shared_secret: [u8; 32] = ring::agreement::agree_ephemeral(
+fn perform_key_exchange(
+    client_private: EphemeralPrivateKey,
+    server_public: &[u8; 32],
+) -> Result<[u8; 32], TlsError> {
+    ring::agreement::agree_ephemeral(
         client_private,
-        &UnparsedPublicKey::new(&X25519, &server_public),
+        &UnparsedPublicKey::new(&X25519, server_public),
         |secret| {
             let mut out = [0u8; 32];
             out.copy_from_slice(secret);
             out
         },
     )
-    .map_err(|_| TlsError::KeyExchangeError("Failed to derive shared secret".to_string()))?;
+    .map_err(|_| TlsError::KeyExchangeError("Failed to derive shared secret".to_string()))
+}
 
-    // Use the correct TLS 1.3 key derivation function
-    let (client_hs_traffic_secret, server_hs_traffic_secret) =
-        derive_tls13_handshake_traffic_secrets_dynamic(
-            &shared_secret,
-            &transcript,
-            hash_alg.clone(),
-        )?;
-
+fn process_encrypted_handshake(
+    stream: &mut TcpStream,
+    server_hs_traffic_secret: &[u8],
+    cipher_suite_obj: &CipherSuite,
+    transcript: &mut TranscriptHash,
+) -> Result<Option<Vec<u8>>, TlsError> {
     let dummy_app_secret = vec![0u8; server_hs_traffic_secret.len()];
 
     let decrypted_records = process_encrypted_handshake_records(
-        &mut stream,
-        &server_hs_traffic_secret,
+        stream,
+        server_hs_traffic_secret,
         &dummy_app_secret,
-        &cipher_suite_obj,
-        &mut transcript,
+        cipher_suite_obj,
+        transcript,
     )?;
 
-    // Extract certificate bytes from the DECRYPTED handshake records
-    let mut server_certificate: Option<Vec<u8>> = None;
     for record in decrypted_records.iter() {
         if let Ok(msgs) = parse_handshake_messages(&record.payload) {
             for msg in msgs.iter() {
                 if msg.msg_type == HandshakeMessageType::Certificate {
                     if let Some(cert) = extract_tls13_certificate(&msg.raw_bytes) {
-                        server_certificate = Some(cert);
-                        break;
+                        return Ok(Some(cert));
                     }
                 }
-            }
-            if server_certificate.is_some() {
-                break;
             }
         }
     }
 
-    Ok((
-        Tls13ConnectionState {
-            client_secret: None, // ring does not expose private key bytes
-            client_public: client_public_bytes,
-            server_public,
-            shared_secret,
-            client_hs_traffic_secret,
-            server_hs_traffic_secret,
-            negotiated_cipher_suite,
-            server_random,
-            client_random,
-            transcript_hash: transcript
-                .clone_hash()
-                .map_err(|e| TlsError::HandshakeError(e.to_string()))?,
-        },
-        server_certificate,
-    ))
+    Ok(None)
 }
 
-/// Extract the first certificate from a TLS 1.3 Certificate handshake message
-fn extract_tls13_certificate(certificate_msg: &[u8]) -> Option<Vec<u8>> {
-    // TLS 1.3 Certificate message structure:
-    // Handshake header (4 bytes) + Certificate request context + Certificate list
+// ================================
+// CERTIFICATE EXTRACTION
 
+fn extract_tls13_certificate(certificate_msg: &[u8]) -> Option<Vec<u8>> {
     if certificate_msg.len() <= 5 {
         return None;
     }
 
     let context_len = certificate_msg[4] as usize;
-    let cert_list_start = 4 + 1 + context_len; // Skip handshake header + context length + context
+    let cert_list_start = 4 + 1 + context_len;
 
     if certificate_msg.len() <= cert_list_start + 3 {
         return None;
     }
 
-    // Certificate list length (3 bytes)
     let cert_data_start = cert_list_start + 3;
 
     if certificate_msg.len() <= cert_data_start + 3 {
         return None;
     }
 
-    // First certificate length (3 bytes)
     let first_cert_len = u32::from_be_bytes([
         0,
         certificate_msg[cert_data_start],
@@ -225,10 +277,4 @@ fn extract_tls13_certificate(certificate_msg: &[u8]) -> Option<Vec<u8>> {
     } else {
         None
     }
-}
-
-/// Clean test function to perform a TLS 1.3 handshake with any domain
-/// Returns certificate if handshake succeeds, Err(TlsError) otherwise
-pub fn test_tls13(domain: &str) -> Result<Option<Vec<u8>>, TlsError> {
-    perform_tls13_handshake_full_with_cert(domain).map(|(_state, cert)| cert)
 }
