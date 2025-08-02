@@ -341,9 +341,8 @@ impl TlsAlert {
     }
 }
 
-// =============================================================================
+// =============================================
 // PARSED MESSAGE STRUCTURES
-// =============================================================================
 
 #[derive(Debug, Clone)]
 pub struct ServerHelloParsed {
@@ -418,7 +417,7 @@ impl CipherSuite {
                 mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha256,
             },
-            // TLS 1.2 ECDHE Cipher Suites
+            // TLS 1.2 ECDHE RSA Cipher Suites
             [0xc0, 0x2f] => CipherSuite {
                 id,
                 name: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -434,6 +433,40 @@ impl CipherSuite {
                 fixed_iv_length: 4,
                 mac_key_length: 0,
                 hash_algorithm: HashAlgorithm::Sha384,
+            },
+            // TLS 1.2 ECDHE ECDSA Cipher Suites (ADD THESE!)
+            [0xc0, 0x2b] => CipherSuite {
+                id,
+                name: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+                key_length: 16,
+                fixed_iv_length: 4,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha256,
+            },
+            [0xc0, 0x2c] => CipherSuite {
+                id,
+                name: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+                key_length: 32,
+                fixed_iv_length: 4,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha384,
+            },
+            // CHACHA20 Cipher Suites (ADD THESE!)
+            [0xcc, 0xa8] => CipherSuite {
+                id,
+                name: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+                key_length: 32,
+                fixed_iv_length: 4,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha256,
+            },
+            [0xcc, 0xa9] => CipherSuite {
+                id,
+                name: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+                key_length: 32,
+                fixed_iv_length: 4,
+                mac_key_length: 0,
+                hash_algorithm: HashAlgorithm::Sha256,
             },
             // Default for unknown cipher suites
             _ => CipherSuite {

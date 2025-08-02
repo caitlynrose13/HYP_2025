@@ -79,19 +79,16 @@ fn extract_validity(cert: &X509Certificate) -> (String, String, bool) {
 fn format_asn1_time_to_iso(time: &ASN1Time) -> String {
     // Convert ASN1Time to string first
     let time_str = time.to_string();
-    println!("[DEBUG] ASN1Time string: {}", time_str);
 
     // Try to parse the new format: "Jul  7 08:34:03 2025 +00:00"
     if let Ok(dt) = chrono::DateTime::parse_from_str(&time_str, "%b %d %H:%M:%S %Y %z") {
         let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        println!("[DEBUG] Parsed new format: {}", result);
         return result;
     }
 
     // Try alternative format with double space: "Jul  7 08:34:03 2025 +00:00"
     if let Ok(dt) = chrono::DateTime::parse_from_str(&time_str, "%b  %d %H:%M:%S %Y %z") {
         let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        println!("[DEBUG] Parsed double space format: {}", result);
         return result;
     }
 
@@ -101,7 +98,6 @@ fn format_asn1_time_to_iso(time: &ASN1Time) -> String {
         let result = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        println!("[DEBUG] Parsed YY format: {}", result);
         return result;
     }
 
@@ -110,25 +106,21 @@ fn format_asn1_time_to_iso(time: &ASN1Time) -> String {
         let result = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        println!("[DEBUG] Parsed YYYY format: {}", result);
         return result;
     }
 
     // Format 3: Try RFC2822 format
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&time_str) {
         let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        println!("[DEBUG] Parsed RFC2822 format: {}", result);
         return result;
     }
 
     // Format 4: Try RFC3339/ISO format
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&time_str) {
         let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        println!("[DEBUG] Parsed RFC3339 format: {}", result);
         return result;
     }
 
-    println!("[ERROR] Failed to parse date: {}", time_str);
     "<invalid date>".to_string()
 }
 

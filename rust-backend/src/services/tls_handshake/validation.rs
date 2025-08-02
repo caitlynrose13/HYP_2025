@@ -71,7 +71,6 @@ pub fn verify_server_key_exchange_signature(
 ) -> Result<(), TlsError> {
     // Validate input parameters
     if cert_chain.is_empty() {
-        log_debug("No certificates provided, skipping signature verification");
         return Ok(());
     }
 
@@ -83,9 +82,6 @@ pub fn verify_server_key_exchange_signature(
 
     // Prepare the signed data according to TLS specification
     let signed_data = prepare_signature_data(client_random, server_random, &ske.params_raw);
-
-    // Log signature details for debugging
-    log_signature_details(ske);
 
     // Route to appropriate verification method based on key type
     match public_key_info.key_type {
@@ -116,11 +112,6 @@ pub fn validate_certificate_chain(cert_chain: &[Vec<u8>]) -> Result<(), TlsError
         ));
     }
 
-    log_debug(&format!(
-        "Validating certificate chain with {} certificates",
-        cert_chain.len()
-    ));
-
     // Parse and validate each certificate in the chain
     for (index, cert_der) in cert_chain.iter().enumerate() {
         let (_, cert) = X509Certificate::from_der(cert_der).map_err(|e| {
@@ -129,17 +120,12 @@ pub fn validate_certificate_chain(cert_chain: &[Vec<u8>]) -> Result<(), TlsError
 
         // Basic validity period check - ASN1Time fields are not Options
         let validity = cert.validity();
-        log_debug(&format!(
-            "Certificate {} has validity period defined (not_before and not_after present)",
-            index
-        ));
         // For assessment tool, we just verify we can access the validity fields
         // Full date validation would require proper ASN1Time to DateTime conversion
 
-        log_debug(&format!("Certificate {} parsed successfully", index));
+        // log_debug(&format!("Certificate {} parsed successfully", index));
     }
 
-    log_debug("Certificate chain validation completed");
     Ok(())
 }
 
@@ -220,19 +206,9 @@ fn verify_ecdsa_signature(
         )));
     }
 
-    log_debug(&format!(
-        "ECDSA signature algorithm: 0x{:02x}{:02x}",
-        ske.signature_algorithm[0], ske.signature_algorithm[1]
-    ));
-    log_debug(&format!(
-        "ECDSA signature length: {} bytes",
-        ske.signature.len()
-    ));
-
     // For assessment tool - perform structural validation only
     validate_ecdsa_signature_structure(ske)?;
 
-    log_debug("ECDSA signature validation completed (structural checks only)");
     Ok(())
 }
 
@@ -251,17 +227,17 @@ fn validate_ecdsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(
     }
 
     if ske.signature.len() > 80 {
-        log_debug(&format!(
-            "ECDSA signature longer than typical: {} bytes, but accepting",
-            ske.signature.len()
-        ));
+        // log_debug(&format!(
+        //     "ECDSA signature longer than typical: {} bytes, but accepting",
+        //     ske.signature.len()
+        // ));
     }
 
     // Basic DER sequence validation
     if ske.signature.len() >= 2 && ske.signature[0] == 0x30 {
-        log_debug("ECDSA signature appears to use DER encoding");
+        // log_debug("ECDSA signature appears to use DER encoding");
     } else {
-        log_debug("ECDSA signature may use raw encoding");
+        // log_debug("ECDSA signature may use raw encoding");
     }
 
     Ok(())
@@ -330,7 +306,7 @@ fn verify_rsa_pkcs1_sha256(
         TlsError::HandshakeFailed(format!("RSA-SHA256 signature verification failed: {:?}", e))
     })?;
 
-    log_debug("RSA PKCS#1 SHA256 signature verification successful");
+    // log_debug("RSA PKCS#1 SHA256 signature verification successful");
     Ok(())
 }
 
@@ -348,7 +324,7 @@ fn verify_rsa_pkcs1_sha384(
         TlsError::HandshakeFailed(format!("RSA-SHA384 signature verification failed: {:?}", e))
     })?;
 
-    log_debug("RSA PKCS#1 SHA384 signature verification successful");
+    // log_debug("RSA PKCS#1 SHA384 signature verification successful");
     Ok(())
 }
 
@@ -366,7 +342,7 @@ fn verify_rsa_pkcs1_sha512(
         TlsError::HandshakeFailed(format!("RSA-SHA512 signature verification failed: {:?}", e))
     })?;
 
-    log_debug("RSA PKCS#1 SHA512 signature verification successful");
+    // log_debug("RSA PKCS#1 SHA512 signature verification successful");
     Ok(())
 }
 
@@ -378,19 +354,19 @@ fn verify_rsa_pss_signature(
     ske: &ServerKeyExchangeParsed,
     _signed_data: &[u8],
 ) -> Result<(), TlsError> {
-    log_debug(&format!(
-        "RSA-PSS signature algorithm detected: 0x{:02x}{:02x}",
-        ske.signature_algorithm[0], ske.signature_algorithm[1]
-    ));
-    log_debug(&format!(
-        "RSA-PSS signature length: {} bytes",
-        ske.signature.len()
-    ));
+    // log_debug(&format!(
+    //     "RSA-PSS signature algorithm detected: 0x{:02x}{:02x}",
+    //     ske.signature_algorithm[0], ske.signature_algorithm[1]
+    // ));
+    // log_debug(&format!(
+    //     "RSA-PSS signature length: {} bytes",
+    //     ske.signature.len()
+    // ));
 
     // Structural validation for RSA signatures
     validate_rsa_signature_structure(ske)?;
 
-    log_debug("RSA-PSS signature validation completed (structural checks only)");
+    // log_debug("RSA-PSS signature validation completed (structural checks only)");
     Ok(())
 }
 
@@ -402,10 +378,10 @@ fn validate_rsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(),
     let valid_lengths = [128, 256, 384, 512];
 
     if !valid_lengths.contains(&ske.signature.len()) {
-        log_debug(&format!(
-            "RSA signature length {} doesn't match common key sizes, but accepting for assessment",
-            ske.signature.len()
-        ));
+        // log_debug(&format!(
+        //     "RSA signature length {} doesn't match common key sizes, but accepting for assessment",
+        //     ske.signature.len()
+        // ));
     }
 
     // RSA signatures should not be all zeros or all 0xFF
@@ -444,20 +420,6 @@ fn prepare_signature_data(
     signed_data.extend_from_slice(server_random);
     signed_data.extend_from_slice(params_raw);
     signed_data
-}
-
-/// Logs signature details for debugging
-fn log_signature_details(ske: &ServerKeyExchangeParsed) {
-    log_debug(&format!(
-        "Signature algorithm: 0x{:02x}{:02x}",
-        ske.signature_algorithm[0], ske.signature_algorithm[1]
-    ));
-    log_debug(&format!("Signature length: {} bytes", ske.signature.len()));
-}
-
-/// Debug logging helper (can be configured for different output targets)
-fn log_debug(message: &str) {
-    eprintln!("[DEBUG] {}", message);
 }
 
 /// Converts signature algorithm bytes to human-readable string

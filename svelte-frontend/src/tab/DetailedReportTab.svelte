@@ -258,20 +258,26 @@
       <h2>Protocol Support</h2>
       <table>
         <tbody>
-          <tr
-            ><td>TLS 1.0:</td><td
+          <tr>
+            <td>TLS 1.0:</td>
+            <td
               class="protocol-status {cert.protocols?.tls_1_0 === 'Supported'
-                ? 'supported'
-                : 'not-supported'}">{cert.protocols?.tls_1_0 || "Unknown"}</td
-            ></tr
-          >
-          <tr
-            ><td>TLS 1.1:</td><td
+                ? 'not-supported'
+                : 'supported'}"
+            >
+              {cert.protocols?.tls_1_0 || "Unknown"}
+            </td>
+          </tr>
+          <tr>
+            <td>TLS 1.1:</td>
+            <td
               class="protocol-status {cert.protocols?.tls_1_1 === 'Supported'
-                ? 'supported'
-                : 'not-supported'}">{cert.protocols?.tls_1_1 || "Unknown"}</td
-            ></tr
-          >
+                ? 'not-supported'
+                : 'supported'}"
+            >
+              {cert.protocols?.tls_1_1 || "Unknown"}
+            </td>
+          </tr>
           <tr
             ><td>TLS 1.2:</td><td
               class="protocol-status {cert.protocols?.tls_1_2 === 'Supported'

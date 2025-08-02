@@ -28,7 +28,6 @@ pub struct AssessmentResponse {
 
 // ====================================
 // DATA STRUCTURES
-// ====================================
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct CertificateInfo {
@@ -105,7 +104,6 @@ impl AssessmentData {
                 tls12_supported: false,
                 tls11_supported: false,
                 tls10_supported: false,
-                cipher_is_strong: false,
                 cert_valid: false,
                 cert_expired: false,
                 cert_key_strength_ok: false,
@@ -195,8 +193,7 @@ pub async fn assess_domain(
 }
 
 // ====================================
-// CACHE MANAGEMENT
-// ====================================
+// CACHE MANAGEMENT=
 
 /// Check for recent cached scan results
 async fn check_cached_scan(
@@ -262,7 +259,6 @@ async fn check_cached_scan(
 
 // ====================================
 // TLS PROTOCOL ASSESSMENT
-// ====================================
 
 /// Assess all TLS protocol versions and cipher suites
 async fn assess_tls_protocols(domain: &str, data: &mut AssessmentData) {
@@ -282,22 +278,18 @@ async fn assess_tls12(domain: &str, data: &mut AssessmentData) {
 
     match tls12_result {
         Ok((state, cert_der)) => {
-            println!("✓ TLS 1.2 handshake succeeded for {}", domain);
+            println!("TLS 1.2 handshake succeeded for {}", domain);
             data.protocols.tls_1_2 = "Supported".to_string();
             data.grade_input.tls12_supported = true;
 
-            // Extract cipher suite information
+            // Extract the actual cipher that was negotiated
             let suite_name = crate::services::tls_parser::get_cipher_suite_name(
                 &state.negotiated_cipher_suite.id,
             );
-            data.cipher_suites.preferred_suite = Some(suite_name.clone());
             data.cipher_suites.tls_1_2_suites.push(suite_name.clone());
+            data.cipher_suites.preferred_suite = Some(suite_name.clone());
 
-            if !data.grade_input.cipher_is_strong {
-                data.grade_input.cipher_is_strong = is_cipher_suite_strong(&suite_name);
-            }
-
-            // Extract key exchange information
+            // Extract key exchange info for TLS 1.2
             extract_tls12_key_exchange_info(&suite_name, &state, data);
 
             // Process certificate if available
@@ -307,7 +299,26 @@ async fn assess_tls12(domain: &str, data: &mut AssessmentData) {
         }
         Err(e) => {
             println!("✗ TLS 1.2 handshake failed for {}: {:?}", domain, e);
+            data.protocols.tls_1_2 = "Not Supported".to_string();
+            data.grade_input.tls12_supported = false;
         }
+    }
+}
+
+/// Extract curve information from TLS 1.2 handshake state
+fn extract_actual_curve_from_handshake(
+    state: &crate::services::tls_handshake::client_handshake::TlsConnectionState,
+) -> Option<String> {
+    // TLS 1.2: negotiated_cipher_suite is a CipherSuite struct with .id field
+    let suite_name =
+        crate::services::tls_parser::get_cipher_suite_name(&state.negotiated_cipher_suite.id);
+
+    if suite_name.contains("ECDHE") {
+        Some("P-256".to_string())
+    } else if suite_name.contains("DHE") {
+        Some("DHE".to_string())
+    } else {
+        None
     }
 }
 
@@ -319,28 +330,29 @@ async fn assess_tls13(domain: &str, data: &mut AssessmentData) {
         );
 
     match tls13_result {
-        Ok((state, cert_der_opt)) => {
+        Ok((state, cert_der)) => {
             println!("✓ TLS 1.3 handshake succeeded for {}", domain);
             data.protocols.tls_1_3 = "Supported".to_string();
             data.grade_input.tls13_supported = true;
-            data.grade_input.cipher_is_strong = true;
 
             // Extract key exchange information (TLS 1.3 always has forward secrecy)
             extract_tls13_key_exchange_info(&state, data);
 
-            // Extract cipher suite information
+            // Extract cipher suite information - TLS 1.3 stores raw bytes
             let suite_name =
                 crate::services::tls_parser::get_cipher_suite_name(&state.negotiated_cipher_suite);
             data.cipher_suites.preferred_suite = Some(suite_name.clone());
             data.cipher_suites.tls_1_3_suites.push(suite_name);
 
             // Process certificate if available
-            if let Some(cert_der) = cert_der_opt {
+            if let Some(cert_der) = cert_der {
                 process_certificate(&cert_der, &mut data.certificate_info, &mut data.grade_input);
             }
         }
         Err(e) => {
-            println!("✗ TLS 1.3 handshake failed: {:?}", e);
+            println!("✗ TLS 1.3 handshake failed for {}: {:?}", domain, e);
+            data.protocols.tls_1_3 = "Not Supported".to_string();
+            data.grade_input.tls13_supported = false;
         }
     }
 }
@@ -362,9 +374,8 @@ fn assess_legacy_protocols(domain: &str, data: &mut AssessmentData) {
     };
 }
 
-// ====================================
+// ===================
 // KEY EXCHANGE ANALYSIS
-// ====================================
 
 /// Extract key exchange information from TLS 1.2 handshake
 fn extract_tls12_key_exchange_info(
@@ -373,25 +384,15 @@ fn extract_tls12_key_exchange_info(
     data: &mut AssessmentData,
 ) {
     if suite_name.contains("ECDHE") {
-        println!("[DEBUG] ===== TLS 1.2 KEY EXCHANGE EXTRACTION =====");
-        println!("[DEBUG] Detected ECDHE in cipher suite: {}", suite_name);
-
         data.grade_input.forward_secrecy = true;
         data.key_exchange.supports_forward_secrecy = true;
         data.key_exchange.key_exchange_algorithm = Some("ECDHE".to_string());
 
         if let Some(curve) = extract_actual_curve_from_handshake(state) {
-            println!("[DEBUG] Extracted TLS 1.2 curve: {}", curve);
             data.key_exchange.curve_name = Some(curve);
         } else {
-            println!("[DEBUG] Could not extract TLS 1.2 curve, using fallback");
             data.key_exchange.curve_name = Some("Unknown".to_string());
         }
-
-        println!(
-            "[DEBUG] Final TLS 1.2 key exchange - Algorithm: ECDHE, Curve: {:?}",
-            data.key_exchange.curve_name
-        );
     }
 }
 
@@ -401,41 +402,15 @@ fn extract_tls13_key_exchange_info(
     data: &mut AssessmentData,
 ) {
     if !data.grade_input.forward_secrecy {
-        println!("[DEBUG] ===== TLS 1.3 KEY EXCHANGE EXTRACTION =====");
-
         data.grade_input.forward_secrecy = true;
         data.key_exchange.supports_forward_secrecy = true;
         data.key_exchange.key_exchange_algorithm = Some("ECDHE".to_string());
 
         if let Some(curve) = extract_actual_curve_from_tls13_handshake(state) {
-            println!("[DEBUG] Extracted TLS 1.3 curve: {}", curve);
             data.key_exchange.curve_name = Some(curve);
         } else {
-            println!("[DEBUG] Could not extract TLS 1.3 curve");
             data.key_exchange.curve_name = Some("Unknown".to_string());
         }
-
-        println!(
-            "[DEBUG] Final TLS 1.3 key exchange - Algorithm: ECDHE, Curve: {:?}",
-            data.key_exchange.curve_name
-        );
-    }
-}
-
-/// Extract curve information from TLS 1.2 handshake state
-fn extract_actual_curve_from_handshake(
-    state: &crate::services::tls_handshake::client_handshake::TlsConnectionState,
-) -> Option<String> {
-    // TLS 1.2 implementation uses p256 crate, so it's P-256 curve
-    let suite_name =
-        crate::services::tls_parser::get_cipher_suite_name(&state.negotiated_cipher_suite.id);
-
-    if suite_name.contains("ECDHE") {
-        Some("P-256".to_string())
-    } else if suite_name.contains("DHE") {
-        Some("DHE".to_string())
-    } else {
-        None
     }
 }
 
@@ -475,8 +450,29 @@ fn process_certificate(
         grade_input.cert_valid = !parsed_cert.expired;
         grade_input.cert_expired = parsed_cert.expired;
 
-        if !parsed_cert.expired && cert_info.chain_trust == Some("Trusted".to_string()) {
-            grade_input.cert_key_strength_ok = true;
+        // Key strength logic: RSA >= 2048, EC >= 256
+        grade_input.cert_key_strength_ok = false;
+        if let Some(ref key_size_str) = cert_info.key_size {
+            if let Ok(bits) = key_size_str.parse::<u32>() {
+                // EC keys typically 256, 384, 521; RSA should be >= 2048
+                if cert_info
+                    .signature_algorithm
+                    .as_ref()
+                    .map_or(false, |alg| alg.contains("RSA"))
+                {
+                    if bits >= 2048 {
+                        grade_input.cert_key_strength_ok = true;
+                    }
+                } else if cert_info
+                    .signature_algorithm
+                    .as_ref()
+                    .map_or(false, |alg| alg.contains("ECDSA") || alg.contains("EC"))
+                {
+                    if bits >= 256 {
+                        grade_input.cert_key_strength_ok = true;
+                    }
+                }
+            }
         }
 
         calculate_days_until_expiry(cert_info);
@@ -486,24 +482,18 @@ fn process_certificate(
 /// Calculate days until certificate expiry
 fn calculate_days_until_expiry(cert_info: &mut CertificateInfo) {
     if let Some(valid_to) = &cert_info.valid_to {
-        println!("[DEBUG] Calculating expiry for date: {}", valid_to);
-
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ") {
             let now = chrono::Utc::now().naive_utc();
             let days = (dt - now).num_days();
             cert_info.days_until_expiry = Some(days);
-            println!("[DEBUG] Calculated days until expiry: {}", days);
         } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
             let now = chrono::Utc::now().date_naive();
             let days = (date - now).num_days();
             cert_info.days_until_expiry = Some(days);
-            println!("[DEBUG] Calculated days until expiry (date only): {}", days);
         } else {
-            println!("[ERROR] Failed to parse date: {}", valid_to);
             cert_info.days_until_expiry = None;
         }
     } else {
-        println!("[ERROR] No valid_to date found in certificate");
         cert_info.days_until_expiry = None;
     }
 }
@@ -549,7 +539,6 @@ fn assess_vulnerabilities(data: &mut AssessmentData) {
 
 // ====================================
 // UTILITY FUNCTIONS
-// ====================================
 
 /// Check if a domain supports HSTS (HTTP Strict Transport Security)
 async fn check_hsts_support(domain: &str) -> bool {
@@ -558,32 +547,6 @@ async fn check_hsts_support(domain: &str) -> bool {
     } else {
         false
     }
-}
-
-/// Determine if a cipher suite is considered strong
-fn is_cipher_suite_strong(cipher_suite_name: &str) -> bool {
-    let cipher_lower = cipher_suite_name.to_lowercase();
-
-    // TLS 1.3 cipher suites are all strong by design
-    if cipher_lower.contains("tls_aes") || cipher_lower.contains("tls_chacha20") {
-        return true;
-    }
-
-    // For TLS 1.2, check for strong characteristics
-    let has_forward_secrecy = cipher_lower.contains("ecdhe") || cipher_lower.contains("dhe");
-    let has_strong_encryption = cipher_lower.contains("aes_256_gcm")
-        || cipher_lower.contains("aes_128_gcm")
-        || cipher_lower.contains("chacha20");
-
-    // Avoid weak algorithms
-    let has_weak_elements = cipher_lower.contains("md5")
-        || cipher_lower.contains("sha1")
-        || cipher_lower.contains("des")
-        || cipher_lower.contains("rc4")
-        || cipher_lower.contains("null")
-        || cipher_lower.contains("export");
-
-    has_forward_secrecy && has_strong_encryption && !has_weak_elements
 }
 
 /// Store scan results in database
@@ -620,8 +583,8 @@ async fn store_scan_result(
     )
     .await
     {
-        Ok(_) => println!("[DEBUG] Database insert successful for {}", domain),
-        Err(e) => println!("[ERROR] Database insert failed for {}: {:?}", domain, e),
+        Ok(_) => println!("Database insert successful for {}", domain),
+        Err(e) => println!("Database insert failed for {}: {:?}", domain, e),
     }
 }
 

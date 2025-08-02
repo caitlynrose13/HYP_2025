@@ -233,8 +233,6 @@ fn try_alternative_sequences(
     server_finished_verified: &mut bool,
     finished_verified_by_mac: &mut bool,
 ) -> Result<Option<u64>, TlsError> {
-    println!("[DEBUG] Trying alternative sequence numbers...");
-
     for alt_seq in 0..=MAX_ALTERNATIVE_SEQUENCES {
         match decrypt_record(
             payload,
@@ -248,12 +246,6 @@ fn try_alternative_sequences(
             cipher_suite,
         ) {
             Ok(plaintext) => {
-                println!(
-                    "[SUCCESS] Decrypted with sequence {}: {} bytes!",
-                    alt_seq,
-                    plaintext.len()
-                );
-
                 process_decrypted_handshake_messages(
                     &plaintext,
                     transcript,
@@ -262,16 +254,11 @@ fn try_alternative_sequences(
                     server_hs_traffic_secret,
                     cipher_suite,
                 )?;
-
                 return Ok(Some(alt_seq));
             }
-            Err(_) => {
-                println!("[DEBUG] Sequence {} failed", alt_seq);
-            }
+            Err(_) => continue,
         }
     }
-
-    println!("[ERROR] All sequence numbers failed for this record");
     Ok(None)
 }
 
@@ -289,62 +276,35 @@ fn process_decrypted_handshake_messages(
     }
 
     let mut buffer = HANDSHAKE_BUFFER.lock().unwrap();
-
-    // Append new plaintext to buffer
     buffer.extend_from_slice(plaintext);
-    println!("[DEBUG] Handshake buffer now has {} bytes", buffer.len());
 
     let mut processed_bytes = 0;
 
-    // Process all complete handshake messages in the buffer
     while processed_bytes < buffer.len() {
-        // Check if we have at least the 4-byte handshake header
         if buffer.len() - processed_bytes < 4 {
-            println!("[DEBUG] Waiting for more data - need handshake header");
             break;
         }
 
-        // Read handshake message header
         let start = processed_bytes;
         let msg_type = buffer[start];
         let length_bytes = [buffer[start + 1], buffer[start + 2], buffer[start + 3]];
         let msg_length =
             u32::from_be_bytes([0, length_bytes[0], length_bytes[1], length_bytes[2]]) as usize;
-        let total_msg_size = 4 + msg_length; // header + payload
+        let total_msg_size = 4 + msg_length;
 
-        println!(
-            "[DEBUG] Handshake message: type=0x{:02x}, length={}, total_size={}",
-            msg_type, msg_length, total_msg_size
-        );
-
-        // Check if we have the complete message
         if buffer.len() - processed_bytes < total_msg_size {
-            println!(
-                "[DEBUG] Waiting for more data - need {} more bytes",
-                total_msg_size - (buffer.len() - processed_bytes)
-            );
             break;
         }
 
-        // Extract the complete handshake message
         let complete_message = &buffer[start..start + total_msg_size];
 
-        // Parse this single complete message
         match parse_handshake_messages(complete_message) {
             Ok(handshake_msgs) => {
                 for handshake_msg in handshake_msgs {
                     let handshake_type = handshake_msg.msg_type.as_u8();
-                    println!(
-                        "[SUCCESS] Parsed complete handshake message: type=0x{:02x}, size={}",
-                        handshake_type,
-                        handshake_msg.raw_bytes.len()
-                    );
 
-                    // Handle Finished message specially
                     if handshake_type == 0x14 {
                         *server_finished_verified = true;
-
-                        // Verify Finished MAC before updating transcript
                         let transcript_hash = transcript.clone_hash().unwrap_or_default();
                         let verify_data = &handshake_msg.payload;
                         let hash_alg = get_hash_algorithm(cipher_suite);
@@ -356,29 +316,17 @@ fn process_decrypted_handshake_messages(
                             verify_data,
                         ) {
                             Ok(true) => {
-                                println!("[SUCCESS] Server Finished MAC verified!");
                                 *finished_verified_by_mac = true;
                             }
-                            Ok(false) => {
-                                eprintln!("[ERROR] Server Finished MAC verification failed!");
-                            }
-                            Err(e) => {
-                                eprintln!("[ERROR] Finished MAC verification error: {:?}", e);
-                            }
+                            Ok(false) => {}
+                            Err(_) => {}
                         }
                     }
 
-                    // Update transcript with this message
                     transcript.update(&handshake_msg.raw_bytes);
-                    println!(
-                        "[INFO] Updated transcript with handshake type: 0x{:02x}",
-                        handshake_type
-                    );
                 }
             }
-            Err(e) => {
-                eprintln!("[ERROR] Failed to parse handshake message: {:?}", e);
-                // Skip this message and continue
+            Err(_) => {
                 processed_bytes += 1;
                 continue;
             }
@@ -387,14 +335,8 @@ fn process_decrypted_handshake_messages(
         processed_bytes += total_msg_size;
     }
 
-    // Remove processed bytes from buffer
     if processed_bytes > 0 {
         buffer.drain(0..processed_bytes);
-        println!(
-            "[DEBUG] Removed {} processed bytes, buffer now has {} bytes",
-            processed_bytes,
-            buffer.len()
-        );
     }
 
     Ok(())
@@ -409,12 +351,11 @@ fn get_hash_algorithm(cipher_suite: &CipherSuite) -> TranscriptHashAlgorithm {
     }
 }
 
-// ============================================================================
+// ==========================
 // TLS RECORD READING
 
 /// Read a single TLS record from a stream
 pub fn read_tls_record(stream: &mut TcpStream) -> Result<TlsRecord, TlsError> {
-    // Read the 5-byte TLS record header
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).map_err(|e| {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -424,18 +365,11 @@ pub fn read_tls_record(stream: &mut TcpStream) -> Result<TlsRecord, TlsError> {
         }
     })?;
 
-    // Parse header
     let content_type = header[0];
     let version_major = header[1];
     let version_minor = header[2];
     let payload_length = u16::from_be_bytes([header[3], header[4]]) as usize;
 
-    println!(
-        "[DEBUG] Reading TLS record: type={:02x}, version={:02x}{:02x}, length={}",
-        content_type, version_major, version_minor, payload_length
-    );
-
-    // Validate payload length
     if payload_length > MAX_TLS_RECORD_SIZE {
         return Err(TlsError::HandshakeError(format!(
             "TLS record payload too large: {} bytes",
@@ -443,7 +377,6 @@ pub fn read_tls_record(stream: &mut TcpStream) -> Result<TlsRecord, TlsError> {
         )));
     }
 
-    // Read the complete payload
     let mut payload = vec![0u8; payload_length];
     stream.read_exact(&mut payload).map_err(|e| {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -456,12 +389,6 @@ pub fn read_tls_record(stream: &mut TcpStream) -> Result<TlsRecord, TlsError> {
         }
     })?;
 
-    println!(
-        "[DEBUG] Successfully read complete TLS record: {} bytes total",
-        5 + payload_length
-    );
-
-    // Parse content type
     let content_type_enum = TlsContentType::try_from_u8(content_type).ok_or_else(|| {
         TlsError::HandshakeError(format!("Invalid content type: 0x{:02x}", content_type))
     })?;

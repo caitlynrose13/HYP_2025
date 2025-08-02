@@ -247,7 +247,6 @@ pub fn perform_tls_handshake_full_with_cert(
     ))
 }
 
-/// Simple test function for TLS 1.2 handshake validation
 ///
 /// Returns Ok(()) if handshake succeeds, Err(TlsError) otherwise.
 pub fn test_tls12(domain: &str) -> Result<(), TlsError> {
@@ -402,13 +401,14 @@ fn derive_tls12_keys(
     let (client_cipher, client_iv, server_cipher, server_iv) =
         keys::derive_aead_keys(cipher_suite, key_block)?;
 
+    // Extract raw keys from the key block using correct TLS 1.2 AEAD layout
     let key_len = cipher_suite.key_length as usize;
-    let mut offset = 0;
-    offset += cipher_suite.mac_key_length as usize; // Skip client MAC key
-    offset += cipher_suite.mac_key_length as usize; // Skip server MAC key
-    let client_key = key_block[offset..offset + key_len].to_vec();
-    offset += key_len;
-    let server_key = key_block[offset..offset + key_len].to_vec();
+    let _iv_len = cipher_suite.fixed_iv_length as usize;
+
+    // TLS 1.2 AEAD key block layout: client_key | server_key | client_iv | server_iv
+    let client_key = key_block[0..key_len].to_vec();
+    let server_key = key_block[key_len..key_len * 2].to_vec();
+    // IVs are already extracted correctly by derive_aead_keys()
 
     Ok((
         client_key,
