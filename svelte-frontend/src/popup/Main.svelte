@@ -7,11 +7,7 @@
   import SettingsPage from "./SettingsPage.svelte";
   import GradeCard from "./components/GradeCard.svelte";
 
-  $: {
-    document.body.setAttribute("data-theme", $theme);
-  }
-
-  // Load persistent settings from localStorage on startup
+  // Persistent settings
   let autoScan = false;
   let scanOnlyHttps = true;
   let darkMode = false;
@@ -23,12 +19,12 @@
     theme.set(darkMode ? "dark" : "light");
   }
 
+  // Domain and analysis state
   let domain: string = "";
   let result: string = "";
   let error: string = "";
   let loading: boolean = false;
   let analysisInitiated: boolean = false;
-
   let tlsReportData: any = null;
 
   // Calculate days until certificate expiry
@@ -95,11 +91,10 @@
     };
   }
 
-  //Function to assess domain, takes in a domain string to parse to backend.
+  // Assess domain and fetch report from backend
   async function assess(domainToAssess: string) {
     if (!domainToAssess || loading) return;
 
-    // Always use the full URL for logic
     let urlToAssess = domainToAssess;
     if (
       !urlToAssess.startsWith("http://") &&
@@ -108,7 +103,6 @@
       urlToAssess = `https://${urlToAssess}`;
     }
 
-    // Only block HTTP URLs if scanOnlyHttps is enabled
     if (scanOnlyHttps && urlToAssess.startsWith("http://")) {
       error =
         "This domain uses HTTP. Only secure (HTTPS) domains can be scanned.";
@@ -128,7 +122,6 @@
       return;
     }
 
-    // Extract hostname for backend
     let backendDomain = urlToAssess;
     try {
       backendDomain = new URL(urlToAssess).hostname;
@@ -142,10 +135,8 @@
     tlsReportData = null;
 
     try {
-      // ...existing code...
       const controller = new AbortController();
       setTimeout(() => {
-        console.log("Request timeout reached after 60 seconds, aborting...");
         controller.abort();
       }, 60000);
 
@@ -155,22 +146,17 @@
         body: JSON.stringify({ domain: backendDomain }),
         signal: controller.signal,
       });
-      // ...existing code...
       if (!res.ok) {
         const errorText = await res.text();
-        console.error("HTTP error response:", errorText);
         throw new Error(`HTTP error! Status: ${res.status} - ${errorText}`);
       }
 
       const json = await res.json();
-      // ...existing code...
       tlsReportData = json;
       result = "Analysis complete.";
-      console.log("tlsReportData set:", tlsReportData);
     } catch (err: any) {
-      // ...existing code...
       if (err.name === "AbortError") {
-        error = `Request timed out after 30 seconds. The TLS assessment may take longer for some domains.`;
+        error = `Request timed out after 60 seconds. The TLS assessment may take longer for some domains.`;
       } else {
         error = `Failed to connect to backend or invalid response: ${err.message || err}`;
       }
@@ -179,21 +165,18 @@
     }
   }
 
-  // Automatically get the active tab's domain on mount and apply settings
+  // Auto-fill domain and scan on mount if enabled
   onMount(async () => {
     loadSettings();
     const activeUrl = await getActiveTabUrl();
     if (activeUrl) {
-      console.log("[ Auto-filled URL:", activeUrl);
       domain = activeUrl;
-      // Auto scan logic from persistent settings
       if (autoScan) {
         analysisInitiated = true;
         assess(domain);
       }
     } else {
       error = "Failed to get active tab URL.";
-      console.warn("Couldn't retrieve active tab URL.");
     }
   });
 
@@ -215,75 +198,7 @@
   }
 </script>
 
-<!--Main UI-->
 <main>
-  <style>
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background-color: var(--header-bg-color);
-      padding: 8px 10px;
-      border-bottom: 1px solid var(--border-color);
-    }
-    .header h1 {
-      margin: 0;
-      font-size: 1.35em;
-      color: var(--text-color);
-      font-weight: 700;
-      text-align: center;
-      flex-grow: 1;
-    }
-    .main-content {
-      padding: 24px 10px 32px 10px;
-      min-height: 70vh;
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-start;
-    }
-    .security-overview-heading {
-      font-size: 1.18em;
-      font-weight: 700;
-      margin: 0 0 1em 0;
-      color: var(--text-color);
-      text-align: left;
-      letter-spacing: 0.5px;
-    }
-    .menu-button {
-      background: none;
-      border: none;
-      color: var(--text-color);
-      font-size: 1.3em;
-      cursor: pointer;
-      padding: 0;
-      width: 40px;
-      height: 40px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      outline: none;
-      transition: color 0.2s;
-    }
-    .menu-button:hover,
-    .menu-button:focus {
-      opacity: 0.7;
-      color: var(--button-bg-color);
-      outline: none;
-    }
-    .input-section {
-      display: flex;
-      padding: 10px;
-      gap: 8px;
-      border-bottom: 1px solid var(--border-color);
-      background-color: var(--card-background-color);
-    }
-    .results-area {
-      flex-grow: 1;
-      padding: 10px;
-      background-color: var(--card-background-color);
-      overflow-y: visible;
-    }
-  </style>
   {#if $currentView === "home"}
     <header class="header">
       <h1>SSL/TLS Analyser</h1>
@@ -342,3 +257,71 @@
     <SettingsPage onGoBack={goToHome} />
   {/if}
 </main>
+
+<style>
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: var(--header-bg-color);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-color);
+  }
+  .header h1 {
+    margin: 0;
+    font-size: 1.35em;
+    color: var(--text-color);
+    font-weight: 700;
+    text-align: center;
+    flex-grow: 1;
+  }
+  .main-content {
+    padding: 24px 10px 32px 10px;
+    min-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+  }
+  .security-overview-heading {
+    font-size: 1.18em;
+    font-weight: 700;
+    margin: 0 0 1em 0;
+    color: var(--text-color);
+    text-align: left;
+    letter-spacing: 0.5px;
+  }
+  .menu-button {
+    background: none;
+    border: none;
+    color: var(--text-color);
+    font-size: 1.3em;
+    cursor: pointer;
+    padding: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    outline: none;
+    transition: color 0.2s;
+  }
+  .menu-button:hover,
+  .menu-button:focus {
+    opacity: 0.7;
+    color: var(--button-bg-color);
+    outline: none;
+  }
+  .input-section {
+    display: flex;
+    padding: 10px;
+    gap: 8px;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--card-background-color);
+  }
+  .results-area {
+    flex-grow: 1;
+    padding: 10px;
+    background-color: var(--card-background-color);
+    overflow-y: visible;
+  }
+</style>

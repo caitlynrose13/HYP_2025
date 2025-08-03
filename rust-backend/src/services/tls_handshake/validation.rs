@@ -120,7 +120,7 @@ pub fn validate_certificate_chain(cert_chain: &[Vec<u8>]) -> Result<(), TlsError
 
         // Basic validity period check - ASN1Time fields are not Options
         let validity = cert.validity();
-        // For assessment tool, we just verify we can access the validity fields
+        // For assessment tool, just verify can access the validity fields
         // Full date validation would require proper ASN1Time to DateTime conversion
 
         // log_debug(&format!("Certificate {} parsed successfully", index));
@@ -349,7 +349,7 @@ fn verify_rsa_pkcs1_sha512(
 /// Verifies RSA-PSS signatures (structural validation for assessment)
 ///
 /// RSA-PSS is more complex to implement correctly, so for assessment purposes
-/// we perform structural validation rather than full cryptographic verification.
+/// perform structural validation rather than full cryptographic verification.
 fn verify_rsa_pss_signature(
     ske: &ServerKeyExchangeParsed,
     _signed_data: &[u8],

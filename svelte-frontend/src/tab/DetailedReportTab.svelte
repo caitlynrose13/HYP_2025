@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { theme } from "../stores/themeStore";
+  import { onMount } from "svelte";
+  import { get } from "svelte/store";
+
   export let handleGoBack: () => void;
   export let tlsReportData: any;
 
   $: cert = tlsReportData || {};
-  import { theme } from "../stores/themeStore";
-  import { onMount } from "svelte";
-  import { get } from "svelte/store";
 
   // Spinner and error states for external scans
   let mozillaLoading = false;
@@ -58,8 +59,8 @@
     }
   }
 
+  // Theme and scan initialization
   onMount(() => {
-    // Load theme from localStorage and apply globally
     const savedTheme =
       localStorage.getItem("darkMode") === "true" ? "dark" : "light";
     theme.set(savedTheme);
@@ -104,6 +105,7 @@
     >
   </header>
 
+  <!-- Summary Section -->
   <section class="summary-section">
     <div class="summary-header">
       <h1 class="domain-title">{cert.domain || "Security Analysis"}</h1>
@@ -121,6 +123,7 @@
       </div>
     </div>
 
+    <!-- Grade Comparison Cards -->
     <div class="summary-comparison">
       <div class="comparison-card our-analysis">
         <img src="/vite.svg" alt="Our Analysis" class="comparison-logo" />
@@ -130,8 +133,9 @@
             class="grade-badge grade-{cert.grade
               ? cert.grade.toLowerCase().replace(/plus/g, '+')
               : 'placeholder'}"
-            >{cert.grade ? cert.grade.replace(/plus/gi, "+") : "-"}</span
           >
+            {cert.grade ? cert.grade.replace(/plus/gi, "+") : "-"}
+          </span>
         </div>
         <div class="comparison-time">
           Scan Time:
@@ -219,6 +223,7 @@
     </div>
   </section>
 
+  <!-- Grid Section: Certificate, Protocols, Cipher Suites, Key Exchange, Vulnerabilities -->
   <div class="grid-section">
     <div class="grid-card">
       <h2>Certificate</h2>
@@ -245,11 +250,10 @@
             <td>{cert.certificate?.chain_trust || "Unknown"}</td>
           </tr>
           {#if cert.certificate?.subject_alt_names && cert.certificate.subject_alt_names.length > 0}
-            <tr
-              ><td>Subject Alt Names:</td><td
-                >{cert.certificate.subject_alt_names.join(", ")}</td
-              ></tr
-            >
+            <tr>
+              <td>Subject Alt Names:</td>
+              <td>{cert.certificate.subject_alt_names.join(", ")}</td>
+            </tr>
           {/if}
         </tbody>
       </table>
@@ -278,20 +282,26 @@
               {cert.protocols?.tls_1_1 || "Unknown"}
             </td>
           </tr>
-          <tr
-            ><td>TLS 1.2:</td><td
+          <tr>
+            <td>TLS 1.2:</td>
+            <td
               class="protocol-status {cert.protocols?.tls_1_2 === 'Supported'
                 ? 'supported'
-                : 'not-supported'}">{cert.protocols?.tls_1_2 || "Unknown"}</td
-            ></tr
-          >
-          <tr
-            ><td>TLS 1.3:</td><td
+                : 'not-supported'}"
+            >
+              {cert.protocols?.tls_1_2 || "Unknown"}
+            </td>
+          </tr>
+          <tr>
+            <td>TLS 1.3:</td>
+            <td
               class="protocol-status {cert.protocols?.tls_1_3 === 'Supported'
                 ? 'supported'
-                : 'not-supported'}">{cert.protocols?.tls_1_3 || "Unknown"}</td
-            ></tr
-          >
+                : 'not-supported'}"
+            >
+              {cert.protocols?.tls_1_3 || "Unknown"}
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -300,24 +310,22 @@
       <table>
         <tbody>
           {#if cert.cipher_suites?.preferred_suite}
-            <tr
-              ><td>Preferred:</td><td>{cert.cipher_suites.preferred_suite}</td
-              ></tr
-            >
+            <tr>
+              <td>Preferred:</td>
+              <td>{cert.cipher_suites.preferred_suite}</td>
+            </tr>
           {/if}
           {#if cert.cipher_suites?.tls_1_2_suites && cert.cipher_suites.tls_1_2_suites.length > 0}
-            <tr
-              ><td>TLS 1.2:</td><td
-                >{cert.cipher_suites.tls_1_2_suites.join(", ")}</td
-              ></tr
-            >
+            <tr>
+              <td>TLS 1.2:</td>
+              <td>{cert.cipher_suites.tls_1_2_suites.join(", ")}</td>
+            </tr>
           {/if}
           {#if cert.cipher_suites?.tls_1_3_suites && cert.cipher_suites.tls_1_3_suites.length > 0}
-            <tr
-              ><td>TLS 1.3:</td><td
-                >{cert.cipher_suites.tls_1_3_suites.join(", ")}</td
-              ></tr
-            >
+            <tr>
+              <td>TLS 1.3:</td>
+              <td>{cert.cipher_suites.tls_1_3_suites.join(", ")}</td>
+            </tr>
           {/if}
         </tbody>
       </table>
@@ -326,23 +334,27 @@
       <h2>Key Exchange</h2>
       <table>
         <tbody>
-          <tr
-            ><td>Forward Secrecy:</td><td
+          <tr>
+            <td>Forward Secrecy:</td>
+            <td
               class="fs-status {cert.key_exchange?.supports_forward_secrecy
                 ? 'supported'
                 : 'not-supported'}"
-              >{cert.key_exchange?.supports_forward_secrecy ? "Yes" : "No"}</td
-            ></tr
-          >
-          {#if cert.key_exchange?.key_exchange_algorithm}
-            <tr
-              ><td>Algorithm:</td><td
-                >{cert.key_exchange.key_exchange_algorithm}</td
-              ></tr
             >
+              {cert.key_exchange?.supports_forward_secrecy ? "Yes" : "No"}
+            </td>
+          </tr>
+          {#if cert.key_exchange?.key_exchange_algorithm}
+            <tr>
+              <td>Algorithm:</td>
+              <td>{cert.key_exchange.key_exchange_algorithm}</td>
+            </tr>
           {/if}
           {#if cert.key_exchange?.curve_name}
-            <tr><td>Curve:</td><td>{cert.key_exchange.curve_name}</td></tr>
+            <tr>
+              <td>Curve:</td>
+              <td>{cert.key_exchange.curve_name}</td>
+            </tr>
           {/if}
         </tbody>
       </table>
@@ -351,31 +363,36 @@
       <h2>Vulnerabilities</h2>
       <table>
         <tbody>
-          <tr
-            ><td>POODLE:</td><td class="vuln-status"
+          <tr>
+            <td>POODLE:</td>
+            <td class="vuln-status"
               >{cert.vulnerabilities?.poodle || "Unknown"}</td
-            ></tr
-          >
-          <tr
-            ><td>BEAST:</td><td class="vuln-status"
+            >
+          </tr>
+          <tr>
+            <td>BEAST:</td>
+            <td class="vuln-status"
               >{cert.vulnerabilities?.beast || "Unknown"}</td
-            ></tr
-          >
-          <tr
-            ><td>Heartbleed:</td><td class="vuln-status"
+            >
+          </tr>
+          <tr>
+            <td>Heartbleed:</td>
+            <td class="vuln-status"
               >{cert.vulnerabilities?.heartbleed || "Unknown"}</td
-            ></tr
-          >
-          <tr
-            ><td>FREAK:</td><td class="vuln-status"
+            >
+          </tr>
+          <tr>
+            <td>FREAK:</td>
+            <td class="vuln-status"
               >{cert.vulnerabilities?.freak || "Unknown"}</td
-            ></tr
-          >
-          <tr
-            ><td>Logjam:</td><td class="vuln-status"
+            >
+          </tr>
+          <tr>
+            <td>Logjam:</td>
+            <td class="vuln-status"
               >{cert.vulnerabilities?.logjam || "Unknown"}</td
-            ></tr
-          >
+            >
+          </tr>
         </tbody>
       </table>
     </div>

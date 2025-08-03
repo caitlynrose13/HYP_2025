@@ -15,7 +15,6 @@ use crate::handlers::assessment_handler::{
 pub enum Grade {
     APlus,
     A,
-    AMinus,
     B,
     C,
     F,
@@ -163,7 +162,21 @@ pub fn grade_site(input: &GradeInput, _certificate: &CertificateInfo) -> (Grade,
     apply_certificate_penalties(&mut score, &mut reasons, input);
     apply_security_feature_penalties(&mut score, &mut reasons, input);
 
-    let grade = calculate_grade_from_score(score);
+    let mut grade = calculate_grade_from_score(score);
+
+    // Cap grade at B if TLS 1.2 or 1.3 is supported AND TLS 1.1 is also supported
+    if (input.tls12_supported || input.tls13_supported)
+        && input.tls11_supported
+        && grade != Grade::F
+    {
+        if grade == Grade::APlus || grade == Grade::A {
+            grade = Grade::B;
+            reasons.push(
+                "Grade capped at B due to support for obsolete TLS 1.1 protocol.".to_string(),
+            );
+        }
+    }
+
     (grade, reasons)
 }
 
@@ -294,6 +307,19 @@ fn extract_registrar(response: &str) -> Option<String> {
 // GRADING HELPER FUNCTIONS
 
 fn apply_protocol_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &GradeInput) {
+    // Immediate F if TLS 1.0 is supported
+    if input.tls10_supported {
+        *score = 0;
+        reasons.push("Supports obsolete TLS 1.0 protocol (grade override to F).".to_string());
+        return;
+    }
+
+    // Major penalty if TLS 1.1 is supported
+    if input.tls11_supported {
+        *score -= 40;
+        reasons.push("Supports obsolete TLS 1.1 protocol (major penalty applied).".to_string());
+    }
+
     // Check if ANY modern TLS version is supported
     if !input.tls12_supported && !input.tls13_supported {
         *score = 0;
@@ -306,26 +332,9 @@ fn apply_protocol_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &
         // Ideal configuration - no penalty, good compatibility
     } else if input.tls13_supported {
         // TLS 1.3 only - excellent security, no penalty
-        // Modern standard with excellent security
     } else if input.tls12_supported {
         *score -= 10; // Only TLS 1.2 - missing modern standard
         reasons.push("Does not support TLS 1.3 (recommended modern standard).".to_string());
-    }
-
-    // Penalties for obsolete protocols remain the same
-    if input.tls10_supported {
-        *score -= 15;
-        reasons.push("Supports obsolete TLS 1.0 protocol.".to_string());
-    }
-
-    if input.tls11_supported {
-        *score -= 10;
-        reasons.push("Supports obsolete TLS 1.1 protocol.".to_string());
-    }
-
-    if !input.weak_protocols_disabled {
-        *score -= 5;
-        reasons.push("Weak protocols not explicitly disabled.".to_string());
     }
 }
 
@@ -368,10 +377,9 @@ fn apply_security_feature_penalties(
 fn calculate_grade_from_score(score: i32) -> Grade {
     match score {
         95..=100 => Grade::APlus,
-        85..=94 => Grade::A,
-        70..=84 => Grade::AMinus,
-        50..=69 => Grade::B,
-        20..=49 => Grade::C,
+        80..=94 => Grade::A,
+        65..=79 => Grade::B,
+        50..=64 => Grade::C,
         _ => Grade::F,
     }
 }
@@ -443,7 +451,6 @@ impl Grade {
         match self {
             Grade::APlus => "A+",
             Grade::A => "A",
-            Grade::AMinus => "A-",
             Grade::B => "B",
             Grade::C => "C",
             Grade::F => "F",
@@ -454,7 +461,6 @@ impl Grade {
         match self {
             Grade::APlus => "Excellent security configuration",
             Grade::A => "Very good security configuration",
-            Grade::AMinus => "Good security configuration",
             Grade::B => "Adequate security configuration",
             Grade::C => "Poor security configuration",
             Grade::F => "Failed security configuration",

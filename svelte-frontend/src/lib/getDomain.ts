@@ -3,35 +3,24 @@ export async function getActiveTabUrl(): Promise<string | null> {
   return new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const url = tabs[0]?.url;
-      if (!url) {
-        resolve(null);
-      } else {
-        resolve(url);
-      }
+      resolve(url ?? null);
     });
   });
 }
-//function to get the domain from the active tabs URL
 
+// Returns the domain (hostname) from the active tab's URL
 export async function getActiveTabDomain(): Promise<string | null> {
   return new Promise((resolve) => {
-    //wrap chrome.tabs.query in a promise
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      //get active, cureent window tab
-
-      console.log("queried tabs", tabs);
-      const url = tabs[0]?.url; //get the first (basically only) tab URL
+      const url = tabs[0]?.url;
       if (!url) {
-        console.log("no URL found");
-        return resolve(null);
+        resolve(null);
+        return;
       }
-      console.log("URL found:", url);
       try {
         const { hostname } = new URL(url);
-        console.log("Parsed hostname:", hostname);
         resolve(hostname);
       } catch (error) {
-        console.error("Error parsing URL:", error);
         resolve(null);
       }
     });

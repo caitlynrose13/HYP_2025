@@ -593,7 +593,6 @@ fn parse_grade_from_string(grade_str: &str) -> Grade {
     match grade_str {
         "APlus" => Grade::APlus,
         "A" => Grade::A,
-        "AMinus" => Grade::AMinus,
         "B" => Grade::B,
         "C" => Grade::C,
         "F" => Grade::F,

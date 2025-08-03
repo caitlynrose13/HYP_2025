@@ -5,22 +5,19 @@
 
   let tlsReportData: any = null;
 
+  // Initialize theme and load report data from localStorage
   onMount(() => {
-    // Load theme from localStorage and apply globally
     const savedTheme =
       localStorage.getItem("darkMode") === "true" ? "dark" : "light";
     theme.set(savedTheme);
-
-    // Apply theme to document
     document.body.setAttribute("data-theme", savedTheme);
     document.documentElement.setAttribute("data-theme", savedTheme);
 
-    // Load report data
     const stored = localStorage.getItem("tlsReportData");
     if (stored) {
       try {
         tlsReportData = JSON.parse(stored);
-      } catch (e) {
+      } catch {
         tlsReportData = null;
       }
     }
@@ -38,7 +35,7 @@
     <div class="no-data-content">
       <h2>No Report Data Available</h2>
       <p>Please run a security analysis from the browser extension first.</p>
-      <button class="retry-button" on:click={handleGoBack}> Close Tab </button>
+      <button class="retry-button" on:click={handleGoBack}>Close Tab</button>
     </div>
   </main>
 {/if}
@@ -68,13 +65,13 @@
   .no-data-content h2 {
     font-size: 1.8em;
     font-weight: 600;
-    margin: 0 0 16px 0;
+    margin-bottom: 16px;
     color: var(--text-color);
   }
 
   .no-data-content p {
     font-size: 1.1em;
-    margin: 0 0 32px 0;
+    margin-bottom: 32px;
     color: var(--text-color);
     opacity: 0.8;
     line-height: 1.6;

@@ -97,7 +97,7 @@ pub fn decrypt_record(
     let traffic_secret = match record_type {
         0x16 => handshake_traffic_secret,
         0x17 => {
-            // During handshake phase, if we don't have app secret, fall back to handshake secret
+            // During handshake phase, if don't have app secret, fall back to handshake secret
             if application_traffic_secret.is_empty() {
                 handshake_traffic_secret
             } else {

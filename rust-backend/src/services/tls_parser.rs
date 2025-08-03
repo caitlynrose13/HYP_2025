@@ -597,7 +597,7 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     let current_pos = reader.position() as usize;
     let remaining_len = reader.get_ref().len() - current_pos;
 
-    // Check if we have enough bytes for the TLS record header
+    // Check if  have enough bytes for the TLS record header
     if remaining_len < 5 {
         return Ok(None);
     }
@@ -607,7 +607,7 @@ pub fn parse_tls_record(reader: &mut Cursor<&[u8]>) -> Result<Option<TlsRecord>,
     let version_minor = reader.read_u8()?;
     let length = reader.read_u16::<BigEndian>()?;
 
-    // Check if we have enough bytes for the complete record
+    // Check if  have enough bytes for the complete record
     if remaining_len < 5 + length as usize {
         reader.set_position(current_pos as u64);
         return Ok(None);
@@ -669,7 +669,7 @@ pub fn parse_handshake_messages(data: &[u8]) -> Result<Vec<TlsHandshakeMessage>,
             break;
         }
 
-        // Check if we have enough data for the complete message
+        // Check if enough data for the complete message
         if (cursor.position() as usize) + length as usize > data.len() {
             return Err(TlsError::ParserError(TlsParserError::Incomplete {
                 expected: length as usize,

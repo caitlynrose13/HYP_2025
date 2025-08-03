@@ -522,16 +522,16 @@ pub fn read_server_response_with_retry(
             Ok(0) => break, // End of stream
             Ok(n) => {
                 buffer.extend_from_slice(&temp_buffer[..n]);
-                // Check if we have complete records
+                // Check if have complete records
                 if buffer.len() >= 5 {
                     let record_len = u16::from_be_bytes([buffer[3], buffer[4]]) as usize;
                     if buffer.len() >= 5 + record_len {
-                        break; // We have at least one complete record
+                        break; //  at least one complete record
                     }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Timeout - return what we have
+                // Timeout
                 break;
             }
             Err(e) => return Err(TlsError::IoError(e)),

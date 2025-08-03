@@ -2,25 +2,24 @@
 <script lang="ts">
   import "./settings.css";
   import { theme } from "../stores/themeStore";
+  import { onMount } from "svelte";
 
   let isDarkMode = false;
   export let onGoBack: () => void;
-  let autoScanOnPageLoad: boolean = false;
-  let scanOnlyHttps: boolean = true;
+  let autoScanOnPageLoad = false;
+  let scanOnlyHttps = true;
 
-  // Load settings from localStorage on mount
+  // Load settings from localStorage
   function loadSettings() {
     isDarkMode = localStorage.getItem("darkMode") === "true";
     autoScanOnPageLoad = localStorage.getItem("autoScan") === "true";
     scanOnlyHttps = localStorage.getItem("scanOnlyHttps") !== "false";
-    // Only set the global theme variable, do not touch local styles
     theme.set(isDarkMode ? "dark" : "light");
   }
 
-  // Save settings to localStorage (only when toggled)
+  // Save settings to localStorage
   function saveDarkMode() {
     localStorage.setItem("darkMode", isDarkMode.toString());
-    // Only set the global theme variable, do not touch local styles
     theme.set(isDarkMode ? "dark" : "light");
   }
   function saveAutoScan() {
@@ -30,12 +29,7 @@
     localStorage.setItem("scanOnlyHttps", scanOnlyHttps.toString());
   }
 
-  // Initialize settings on mount
-  import { onMount } from "svelte";
-  onMount(() => {
-    loadSettings();
-  });
-
+  // Clear all stored data
   function clearData() {
     localStorage.clear();
     loadSettings();
@@ -45,6 +39,10 @@
   function handleGoBack() {
     onGoBack();
   }
+
+  onMount(() => {
+    loadSettings();
+  });
 </script>
 
 <!--Options to toggle NEED TO IMPLEMENT-->
@@ -134,12 +132,6 @@
       >
     </div>
   </section>
-
-  <div class="bottom-button-container compact-button">
-    <button class="clear-data-button" on:click={clearData}>
-      Clear Stored Data
-    </button>
-  </div>
 </main>
 
 <style>
