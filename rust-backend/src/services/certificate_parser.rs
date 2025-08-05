@@ -22,6 +22,7 @@ pub struct ParsedCertificate {
 // ====================
 // MAIN PARSING FUNCTION
 
+//get the certificate information like subject, issuer, validity period, key size
 pub fn parse_certificate(der: &[u8]) -> Result<ParsedCertificate, String> {
     let (_, cert) = X509Certificate::from_der(der)
         .map_err(|e| format!("Failed to parse certificate: {}", e))?;

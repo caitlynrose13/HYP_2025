@@ -41,9 +41,8 @@ pub fn test_tls13(domain: &str) -> Result<Option<Vec<u8>>, TlsError> {
     perform_tls13_handshake_full_with_cert(domain).map(|(_state, cert)| cert)
 }
 
-// ============================================================================
+// ===================================
 // CORE HANDSHAKE IMPLEMENTATION
-// ============================================================================
 
 pub fn perform_tls13_handshake_full_with_cert(
     domain: &str,

@@ -95,6 +95,7 @@ const SUSPICIOUS_REGISTRARS: &[&str] = &[
     "PDR Ltd.",
 ];
 
+//get the whoisserver address based on TLD (top Level Domain)
 fn get_whois_server(tld: &str) -> &'static str {
     // First try exact match
     if let Some((_, server)) = WHOIS_SERVERS
@@ -108,9 +109,8 @@ fn get_whois_server(tld: &str) -> &'static str {
     "whois.iana.org:43"
 }
 
-// Add this function to extract root domain:
+//remove the "www." prefix if it exists, to get the root domain
 fn extract_root_domain(domain: &str) -> &str {
-    // Remove www. prefix if present
     if domain.starts_with("www.") {
         &domain[4..]
     } else {
@@ -120,9 +120,10 @@ fn extract_root_domain(domain: &str) -> &str {
 
 pub fn whois_query(domain: &str) -> Result<String, String> {
     let root_domain = extract_root_domain(domain); // Extract root domain first
-    let tld = extract_tld(root_domain);
+    let tld = extract_tld(root_domain); // Get TLD from root domain
     let server = get_whois_server(&tld);
 
+    //connect and request registration information from the whois server
     match query_whois_server(root_domain, server) {
         // Query root domain
         Ok(response) => {
@@ -155,14 +156,14 @@ fn extract_referral_server(response: &str) -> Option<String> {
 // GRADING SYSTEM
 
 pub fn grade_site(input: &GradeInput, _certificate: &CertificateInfo) -> (Grade, Vec<String>) {
-    let mut score = 100;
+    let mut score = 100; //set score to 100 and initialise 
     let mut reasons = Vec::new();
 
-    apply_protocol_penalties(&mut score, &mut reasons, input);
+    apply_protocol_penalties(&mut score, &mut reasons, input); //apply penalities
     apply_certificate_penalties(&mut score, &mut reasons, input);
     apply_security_feature_penalties(&mut score, &mut reasons, input);
 
-    let mut grade = calculate_grade_from_score(score);
+    let mut grade = calculate_grade_from_score(score); //match score to grade
 
     // Cap grade at B if TLS 1.2 or 1.3 is supported AND TLS 1.1 is also supported
     if (input.tls12_supported || input.tls13_supported)
@@ -190,7 +191,7 @@ pub fn get_or_run_scan(
     _key_exchange: &KeyExchangeInfo,
     whois_response: Option<&str>,
 ) -> (Grade, Option<String>) {
-    let (mut grade, _technical_reasons) = grade_site(input, certificate);
+    let (mut grade, _technical_reasons) = grade_site(input, certificate); //call the previous function 
     let whois_info = whois_response.map(parse_whois_response);
 
     let whois_issues = check_whois_issues(domain, &whois_info, &mut grade);
@@ -206,13 +207,16 @@ pub fn get_or_run_scan(
 // =========================
 // WHOIS HELPER FUNCTIONS
 
+//get the TLD (Top Level Domain) from a domain name
 fn extract_tld(domain: &str) -> String {
     domain.split('.').last().unwrap_or("").to_lowercase()
 }
 
+//connect to the whois server and query for domain information
 fn query_whois_server(domain: &str, server: &str) -> Result<String, String> {
     use std::net::ToSocketAddrs;
 
+    //parse the server address and port
     let (hostname, port) = if server.contains(':') {
         let parts: Vec<&str> = server.split(':').collect();
         (parts[0], parts[1].parse::<u16>().unwrap_or(43))
@@ -220,12 +224,14 @@ fn query_whois_server(domain: &str, server: &str) -> Result<String, String> {
         (server, 43)
     };
 
+    //resolve the hostname to an address
     let addr = format!("{}:{}", hostname, port)
         .to_socket_addrs()
         .map_err(|e| format!("Failed to resolve {}: {}", hostname, e))?
         .next()
         .ok_or_else(|| format!("No addresses found for {}", hostname))?;
 
+    //connect to the whois server
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
 
@@ -280,7 +286,6 @@ fn extract_creation_date(response: &str) -> Option<NaiveDateTime> {
                         if let Ok(dt) = NaiveDateTime::parse_from_str(date_str, format) {
                             return Some(dt);
                         }
-                        // Also try date-only parsing and assume midnight
                         if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, format) {
                             return Some(date.and_hms_opt(0, 0, 0)?);
                         }
@@ -331,7 +336,7 @@ fn apply_protocol_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &
     if input.tls13_supported && input.tls12_supported {
         // Ideal configuration - no penalty, good compatibility
     } else if input.tls13_supported {
-        // TLS 1.3 only - excellent security, no penalty
+        // TLS 1.3 only - great security, no penalty
     } else if input.tls12_supported {
         *score -= 10; // Only TLS 1.2 - missing modern standard
         reasons.push("Does not support TLS 1.3 (recommended modern standard).".to_string());
@@ -346,7 +351,7 @@ fn apply_certificate_penalties(score: &mut i32, reasons: &mut Vec<String>, input
         return;
     }
 
-    // WEAK KEY: < 2048-bit → -15 points
+    // WEAK KEY: < 2048-bit  -15 points (1024-bit, 512-bit)in
     if !input.cert_key_strength_ok {
         *score -= 15;
         reasons.push("Certificate uses a weak key (e.g., < 2048-bit).".to_string());

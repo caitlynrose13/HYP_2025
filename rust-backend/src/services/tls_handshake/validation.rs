@@ -1,9 +1,4 @@
-//! TLS Certificate and Signature Validation
-//!
-//! This module provides comprehensive validation functionality for TLS handshakes,
-//! including certificate parsing, signature verification, and cryptographic validation.
-//! Supports both RSA and ECDSA signature algorithms as specified in RFC 5246 and RFC 8446.
-
+//TLS Certificate and Signature Validation
 use crate::services::errors::TlsError;
 use crate::services::tls_parser::ServerKeyExchangeParsed;
 use const_oid::ObjectIdentifier as Oid;
@@ -18,16 +13,8 @@ use rsa::signature::Verifier;
 use std::string::ToString;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-// ============================================================================
-// CONSTANTS AND STATIC VALUES
-// ============================================================================
-
-/// Object Identifier for RSA encryption (PKCS #1)
-/// OID: 1.2.840.113549.1.1.1
 pub static OID_RSA_ENCRYPTION: Lazy<Oid> = Lazy::new(|| Oid::new_unwrap("1.2.840.113549.1.1.1"));
 
-/// Object Identifier for Elliptic Curve public keys
-/// OID: 1.2.840.10045.2.1
 pub static OID_EC_PUBLIC_KEY: Lazy<Oid> = Lazy::new(|| Oid::new_unwrap("1.2.840.10045.2.1"));
 
 // TLS SignatureAlgorithm constants (RFC 5246 Section 7.4.1.4.1)
@@ -44,25 +31,7 @@ const SIG_ALG_RSA_PSS_PSS_SHA512: [u8; 2] = [0x08, 0x0b];
 
 // ============================================================================
 // PUBLIC API FUNCTIONS
-// ============================================================================
 
-/// Validates the server key exchange signature using the provided certificate chain
-///
-/// This function implements the complete TLS signature verification process:
-/// 1. Parses the server certificate from the chain
-/// 2. Extracts the public key and determines its type (RSA/ECDSA)
-/// 3. Constructs the signed data (client_random + server_random + params)
-/// 4. Verifies the signature using the appropriate algorithm
-///
-/// # Arguments
-/// * `ske` - Parsed server key exchange message containing signature data
-/// * `client_random` - 32-byte client random from ClientHello
-/// * `server_random` - 32-byte server random from ServerHello
-/// * `cert_chain` - Certificate chain with server certificate first
-///
-/// # Returns
-/// * `Ok(())` if signature verification succeeds
-/// * `Err(TlsError)` if verification fails or certificate is invalid
 pub fn verify_server_key_exchange_signature(
     ske: &ServerKeyExchangeParsed,
     client_random: &[u8; 32],
@@ -97,14 +66,6 @@ pub fn verify_server_key_exchange_signature(
 }
 
 /// Validates a certificate chain for basic structural correctness
-///
-/// Performs basic validation without full PKI verification:
-/// - Certificate parsing and structure validation
-/// - Basic date validity checks
-/// - Chain ordering verification
-///
-/// Note: This is simplified validation suitable for assessment/testing.
-/// Production systems should implement full RFC 5280 path validation.
 pub fn validate_certificate_chain(cert_chain: &[Vec<u8>]) -> Result<(), TlsError> {
     if cert_chain.is_empty() {
         return Err(TlsError::CertificateError(
@@ -118,20 +79,14 @@ pub fn validate_certificate_chain(cert_chain: &[Vec<u8>]) -> Result<(), TlsError
             TlsError::CertificateError(format!("Failed to parse certificate {}: {:?}", index, e))
         })?;
 
-        // Basic validity period check - ASN1Time fields are not Options
         let validity = cert.validity();
-        // For assessment tool, just verify can access the validity fields
-        // Full date validation would require proper ASN1Time to DateTime conversion
-
-        // log_debug(&format!("Certificate {} parsed successfully", index));
     }
 
     Ok(())
 }
 
-// ============================================================================
+// ===============================
 // CERTIFICATE PARSING AND EXTRACTION
-// ============================================================================
 
 /// Represents the type of public key found in a certificate
 #[derive(Debug, Clone, PartialEq)]
@@ -184,15 +139,10 @@ fn extract_public_key_info(cert: &X509Certificate) -> Result<PublicKeyInfo, TlsE
     })
 }
 
-// ============================================================================
+// ===============================================
 // ECDSA SIGNATURE VERIFICATION
-// ============================================================================
 
 /// Verifies ECDSA signatures for TLS key exchange
-///
-/// Supports P-256 with SHA-256 (most common ECDSA variant in TLS).
-/// For assessment purposes, performs structural validation rather than
-/// full cryptographic verification.
 fn verify_ecdsa_signature(
     ske: &ServerKeyExchangeParsed,
     _signed_data: &[u8],
@@ -214,11 +164,6 @@ fn verify_ecdsa_signature(
 
 /// Validates ECDSA signature structure and length
 fn validate_ecdsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(), TlsError> {
-    // ECDSA P-256 signatures are typically 64-74 bytes (DER encoding adds overhead)
-    // - r component: ~32 bytes
-    // - s component: ~32 bytes
-    // - DER encoding overhead: variable
-
     if ske.signature.len() < 64 {
         return Err(TlsError::HandshakeFailed(format!(
             "ECDSA signature too short: {} bytes, minimum expected: 64",
@@ -226,18 +171,11 @@ fn validate_ecdsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(
         )));
     }
 
-    if ske.signature.len() > 80 {
-        // log_debug(&format!(
-        //     "ECDSA signature longer than typical: {} bytes, but accepting",
-        //     ske.signature.len()
-        // ));
-    }
+    if ske.signature.len() > 80 {}
 
     // Basic DER sequence validation
     if ske.signature.len() >= 2 && ske.signature[0] == 0x30 {
-        // log_debug("ECDSA signature appears to use DER encoding");
     } else {
-        // log_debug("ECDSA signature may use raw encoding");
     }
 
     Ok(())
@@ -245,12 +183,8 @@ fn validate_ecdsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(
 
 // ============================================================================
 // RSA SIGNATURE VERIFICATION
-// ============================================================================
 
 /// Verifies RSA signatures for TLS key exchange
-///
-/// Supports both PKCS#1 v1.5 and PSS signature schemes with various hash algorithms.
-/// Implements full cryptographic verification for RSA-PKCS#1 signatures.
 fn verify_rsa_signature(
     ske: &ServerKeyExchangeParsed,
     signed_data: &[u8],
@@ -283,7 +217,6 @@ fn verify_rsa_signature(
 
 /// Parses RSA public key from various encodings
 fn parse_rsa_public_key(public_key_data: &[u8]) -> Result<RsaPublicKey, TlsError> {
-    // Try PKCS#1 DER encoding first (most common in certificates)
     DecodeRsaPkcs1PublicKey::from_pkcs1_der(public_key_data)
         .or_else(|_| {
             // Fallback to PKCS#8 DER encoding
@@ -323,8 +256,6 @@ fn verify_rsa_pkcs1_sha384(
     verifying_key.verify(signed_data, &signature).map_err(|e| {
         TlsError::HandshakeFailed(format!("RSA-SHA384 signature verification failed: {:?}", e))
     })?;
-
-    // log_debug("RSA PKCS#1 SHA384 signature verification successful");
     Ok(())
 }
 
@@ -341,48 +272,24 @@ fn verify_rsa_pkcs1_sha512(
     verifying_key.verify(signed_data, &signature).map_err(|e| {
         TlsError::HandshakeFailed(format!("RSA-SHA512 signature verification failed: {:?}", e))
     })?;
-
-    // log_debug("RSA PKCS#1 SHA512 signature verification successful");
     Ok(())
 }
 
 /// Verifies RSA-PSS signatures (structural validation for assessment)
-///
-/// RSA-PSS is more complex to implement correctly, so for assessment purposes
-/// perform structural validation rather than full cryptographic verification.
 fn verify_rsa_pss_signature(
     ske: &ServerKeyExchangeParsed,
     _signed_data: &[u8],
 ) -> Result<(), TlsError> {
-    // log_debug(&format!(
-    //     "RSA-PSS signature algorithm detected: 0x{:02x}{:02x}",
-    //     ske.signature_algorithm[0], ske.signature_algorithm[1]
-    // ));
-    // log_debug(&format!(
-    //     "RSA-PSS signature length: {} bytes",
-    //     ske.signature.len()
-    // ));
-
-    // Structural validation for RSA signatures
     validate_rsa_signature_structure(ske)?;
 
-    // log_debug("RSA-PSS signature validation completed (structural checks only)");
     Ok(())
 }
 
 /// Validates RSA signature structure and length
 fn validate_rsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(), TlsError> {
-    // RSA signatures should match the key size
-    // Common key sizes: 1024 bits (128 bytes), 2048 bits (256 bytes), 3072 bits (384 bytes), 4096 bits (512 bytes)
-
     let valid_lengths = [128, 256, 384, 512];
 
-    if !valid_lengths.contains(&ske.signature.len()) {
-        // log_debug(&format!(
-        //     "RSA signature length {} doesn't match common key sizes, but accepting for assessment",
-        //     ske.signature.len()
-        // ));
-    }
+    if !valid_lengths.contains(&ske.signature.len()) {}
 
     // RSA signatures should not be all zeros or all 0xFF
     if ske.signature.iter().all(|&b| b == 0) {
@@ -402,14 +309,7 @@ fn validate_rsa_signature_structure(ske: &ServerKeyExchangeParsed) -> Result<(),
 
 // ============================================================================
 // UTILITY FUNCTIONS
-// ============================================================================
 
-/// Prepares the data to be signed according to TLS specification
-///
-/// RFC 5246 Section 7.4.3: The signed data is the concatenation of:
-/// - ClientHello.random (32 bytes)
-/// - ServerHello.random (32 bytes)  
-/// - ServerKeyExchange parameters (variable length)
 fn prepare_signature_data(
     client_random: &[u8; 32],
     server_random: &[u8; 32],

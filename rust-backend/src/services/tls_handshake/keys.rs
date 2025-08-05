@@ -1,12 +1,11 @@
-//! TLS Key Derivation and Cryptographic Operations
-//!
-//! This module provides comprehensive key derivation and cryptographic functions for both
-//! TLS 1.2 and TLS 1.3 protocols. It handles:
-//! - HKDF operations (TLS 1.3)
-//! - PRF operations (TLS 1.2)
-//! - AEAD cipher management
-//! - Key schedule implementations
-//! - Finished message verification
+//TLS Key Derivation and Cryptographic Operations
+// This module provides  key derivation and cryptographic functions for both
+// TLS 1.2 and TLS 1.3 protocols. It handles:
+// - HKDF operations (TLS 1.3)
+// - PRF operations (TLS 1.2)
+// - AEAD cipher management
+// - Key schedule implementations
+// - Finished message verification
 
 use crate::services::errors::TlsError;
 use crate::services::tls_parser::{CipherSuite, TlsContentType, TlsVersion};
@@ -20,10 +19,6 @@ use sha2::digest::Digest;
 use sha2::{Sha256, Sha384};
 use typenum::{U12, U16};
 
-/// AEAD cipher variants supported by the TLS implementation
-///
-/// Provides a unified interface for different AES-GCM key sizes while
-/// maintaining type safety and zero-cost abstractions.
 #[derive(Clone)]
 pub enum TlsAeadCipher {
     /// AES-128-GCM cipher (16-byte key, 12-byte nonce, 16-byte tag)
@@ -51,10 +46,6 @@ const TLS13_LABEL_PREFIX: &[u8] = b"tls13 ";
 // =================================
 // TLS 1.3 KEY DERIVATION (HKDF-BASED)
 
-/// HKDF-Extract for TLS 1.3 (RFC 8446) - static SHA-256 version
-///
-/// Extracts a fixed-length pseudorandom key from input key material.
-/// This is the first stage of HKDF and produces a PRK (pseudorandom key).
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<Prk, TlsError> {
     let salt = Salt::new(HKDF_SHA256, salt);
     let prk = salt.extract(ikm);
@@ -62,9 +53,6 @@ pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<Prk, TlsError> {
 }
 
 /// HKDF-Expand-Label for TLS 1.3 (RFC 8446 Section 7.1) - static SHA-256 version
-///
-/// Expands a PRK into output key material using the TLS 1.3 label format.
-/// The label is automatically prefixed with "tls13 " as required by RFC 8446.
 pub fn hkdf_expand_label(
     prk: &Prk,
     label: &[u8],
@@ -92,9 +80,6 @@ pub fn hkdf_extract_dynamic(salt: &[u8], ikm: &[u8], use_sha384: bool) -> Prk {
 }
 
 /// HKDF-Expand-Label with dynamic hash algorithm selection
-///
-/// Provides the same functionality as `hkdf_expand_label` but with runtime
-/// hash algorithm selection for cipher suites that use SHA-384.
 pub fn hkdf_expand_label_dynamic(
     prk: &Prk,
     label: &[u8],
@@ -114,9 +99,6 @@ pub fn hkdf_expand_label_dynamic(
 }
 
 /// TLS 1.3 Key Schedule: Derive handshake traffic secrets (RFC 8446)
-///
-/// Implements the TLS 1.3 key schedule for deriving client and server
-/// handshake traffic secrets from the shared ECDHE secret.
 pub fn derive_tls13_handshake_traffic_secrets_dynamic(
     shared_secret: &[u8],
     transcript_hash: &[u8],
@@ -167,9 +149,6 @@ pub fn derive_tls13_handshake_traffic_secrets_dynamic(
 // TLS 1.2 KEY DERIVATION (PRF-BASED)
 
 /// Calculates the TLS 1.2 master secret using the PRF
-///
-/// RFC 5246: master_secret = PRF(pre_master_secret, "master secret",
-///                               ClientHello.random + ServerHello.random)[0..47]
 pub fn calculate_master_secret(
     pre_master_secret: &[u8],
     client_random: &[u8; 32],
@@ -195,10 +174,6 @@ pub fn calculate_master_secret(
 }
 
 /// Calculates the TLS 1.2 key block for deriving encryption keys
-///
-/// RFC 5246: key_block = PRF(SecurityParameters.master_secret,
-///                           "key expansion",
-///                           SecurityParameters.server_random + SecurityParameters.client_random)
 pub fn calculate_key_block(
     master_secret: &[u8],
     server_random: &[u8; 32],
@@ -228,10 +203,7 @@ pub fn calculate_key_block(
     Ok(key_block)
 }
 
-/// TLS 1.2 Pseudorandom Function (PRF) implementation
-///
-/// RFC 5246: PRF(secret, label, seed) = P_hash(secret, label + seed)
-/// Supports both SHA-256 and SHA-384 hash functions.
+/// TLS 1.2 Pseudorandom Function (PRF) implementations.
 pub fn prf_tls12(
     secret: &[u8],
     label: &[u8],
@@ -252,7 +224,6 @@ pub fn prf_tls12(
 // AEAD OPERATIONS
 
 /// Derives AEAD keys from TLS 1.2 key block
-///
 /// Extracts client/server encryption keys and initialization vectors from
 /// the key block and creates ready-to-use AEAD cipher instances.
 pub fn derive_aead_keys(
@@ -316,9 +287,6 @@ pub fn derive_aead_keys(
 }
 
 /// Encrypts a TLS record using AES-GCM
-///
-/// Constructs the proper nonce and AAD according to TLS 1.2 specification,
-/// then performs AEAD encryption with authentication.
 pub fn encrypt_gcm_message(
     plaintext: &[u8],
     cipher: &TlsAeadCipher,
@@ -358,9 +326,6 @@ pub fn encrypt_gcm_message(
 }
 
 /// Decrypts a TLS 1.2 GCM message with explicit nonce
-///
-/// Handles the TLS 1.2 record format where the explicit nonce is prepended
-/// to the ciphertext within the record payload.
 pub fn decrypt_gcm_message_with_explicit_nonce(
     ciphertext_with_tag: &[u8],
     cipher: &TlsAeadCipher,
@@ -412,9 +377,7 @@ pub fn decrypt_gcm_message_with_explicit_nonce(
 // ==============================================
 // FINISHED MESSAGE VERIFICATION
 
-/// Calculates TLS 1.2 Finished message verify_data
-///
-/// RFC 5246: verify_data = PRF(master_secret, finished_label, Hash(handshake_messages))[0..11]
+/// Calculates TLS 1.2 Finished message verify_data]
 pub fn calculate_verify_data(
     master_secret: &[u8],
     handshake_messages: &[u8],
@@ -437,7 +400,6 @@ pub fn calculate_verify_data(
 }
 
 /// Calculates verify_data and returns both the data and the handshake hash
-///
 /// Useful when both the verify_data and handshake hash are needed separately.
 pub fn calculate_verify_data_with_hash(
     master_secret: &[u8],
@@ -460,14 +422,9 @@ pub fn calculate_verify_data_with_hash(
     Ok((verify_data.to_vec(), handshake_hash))
 }
 
-// ============================================================================
+// ========================================
 // KEY GENERATION UTILITIES
-// ============================================================================
 
-/// Generates a P-256 ECDH key pair for key exchange
-///
-/// Returns the public key in uncompressed point format (65 bytes) and the
-/// ephemeral secret for computing the shared secret.
 pub fn generate_p256_keyshare() -> ([u8; 65], p256::ecdh::EphemeralSecret) {
     use p256::{EncodedPoint, ecdh::EphemeralSecret};
     use rand::rngs::OsRng;
@@ -498,9 +455,8 @@ pub fn derive_hkdf_keys(
     expand_with_info(&prk, info, output_len)
 }
 
-// ============================================================================
+// =========================================
 // HELPER FUNCTIONS
-// ============================================================================
 
 /// P_hash function for TLS 1.2 PRF with dynamic hash selection
 fn tls12_prf_p_hash(

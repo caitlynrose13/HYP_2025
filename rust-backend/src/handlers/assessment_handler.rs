@@ -137,7 +137,7 @@ pub async fn assess_domain(
     println!("Domain: {}", domain);
     println!(
         "Timestamp: {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC") //LIBARY!!!!
     );
 
     // Initialize assessment data
@@ -540,7 +540,7 @@ fn assess_vulnerabilities(data: &mut AssessmentData) {
 // ====================================
 // UTILITY FUNCTIONS
 
-/// Check if a domain supports HSTS (HTTP Strict Transport Security)
+/// Check if a domain supports HSTS (HTTP Strict Transport Security) //LIBRARY!!!!
 async fn check_hsts_support(domain: &str) -> bool {
     if let Ok(resp) = reqwest::get(format!("https://{}", domain)).await {
         resp.headers().get("strict-transport-security").is_some()

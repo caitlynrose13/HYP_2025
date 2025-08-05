@@ -196,6 +196,10 @@
       "_blank"
     );
   }
+  $: {
+    document.body.setAttribute("data-theme", $theme);
+    document.documentElement.setAttribute("data-theme", $theme);
+  }
 </script>
 
 <main>

@@ -12,7 +12,7 @@ pub struct ExternalScanQuery {
 
 pub async fn external_scan(Query(params): Query<ExternalScanQuery>) -> Json<serde_json::Value> {
     let domain_to_scan = match Url::parse(&params.domain) {
-        Ok(url) => url.host_str().unwrap_or(&params.domain).to_string(),
+        Ok(url) => url.host_str().unwrap_or(&params.domain).to_string(), //Library to parse the URL and extract the host
         Err(_) => params.domain.clone(),
     };
 

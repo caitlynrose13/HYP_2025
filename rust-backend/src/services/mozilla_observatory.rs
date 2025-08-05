@@ -9,6 +9,7 @@ pub struct ObservatoryResult {
     pub scan_duration: Option<String>,
 }
 
+// Fetches results from the Mozilla Observatory API for a given domain
 pub async fn fetch_observatory_results(domain: &str) -> Result<ObservatoryResult, String> {
     let start_time = std::time::Instant::now();
 
@@ -17,6 +18,7 @@ pub async fn fetch_observatory_results(domain: &str) -> Result<ObservatoryResult
         .build()
         .map_err(|e| format!("Client build error: {}", e))?;
 
+    // Construct the URL for initiating a scan
     let scan_start_url = format!(
         "https://observatory-api.mdn.mozilla.net/api/v2/scan?host={}",
         domain

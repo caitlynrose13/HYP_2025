@@ -1,5 +1,6 @@
 <!--Main Settings Page -->
 <script lang="ts">
+  import "../app.css";
   import "./settings.css";
   import { theme } from "../stores/themeStore";
   import { onMount } from "svelte";
@@ -28,12 +29,9 @@
   function saveScanOnlyHttps() {
     localStorage.setItem("scanOnlyHttps", scanOnlyHttps.toString());
   }
-
-  // Clear all stored data
   function clearData() {
     localStorage.clear();
     loadSettings();
-    alert("All stored data cleared!");
   }
 
   function handleGoBack() {
@@ -43,42 +41,36 @@
   onMount(() => {
     loadSettings();
   });
+
+  // Ensure global theme styling is applied
+  $: {
+    document.body.setAttribute("data-theme", $theme);
+    document.documentElement.setAttribute("data-theme", $theme);
+  }
 </script>
 
 <!--Options to toggle NEED TO IMPLEMENT-->
 <main class="settings-page" aria-label="Settings Page">
   <header class="settings-header">
-    <div class="header-left">
-      <button class="back-button" on:click={handleGoBack} aria-label="Go back">
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 20 20"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-          aria-hidden="true"
-        >
-          <path
-            d="M12.5 15L8 10L12.5 5"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
-    </div>
-    <div class="header-center">
-      <h1>Settings</h1>
-    </div>
-    <div class="header-right"></div>
+    <button class="back-button" on:click={handleGoBack} aria-label="Go back">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+        <path
+          d="M12.5 15L8 10L12.5 5"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+    <h1>Settings</h1>
   </header>
 
+  <!-- Preferences Section -->
   <section class="setting-group" aria-labelledby="preferences-header">
     <h2 id="preferences-header">Preferences</h2>
-
     <div class="setting-item">
-      <label for="label-text">Toggle Dark Mode</label>
+      <span class="label-text">Toggle Dark Mode</span>
       <label class="switch">
         <input
           type="checkbox"
@@ -86,12 +78,12 @@
           bind:checked={isDarkMode}
           on:change={saveDarkMode}
         />
-        <span class="slider round"></span>
+        <span class="slider"></span>
       </label>
     </div>
 
     <div class="setting-item">
-      <label for="auto-scan">Automatically scan on page load</label>
+      <span class="label-text">Automatically scan on page load</span>
       <label class="switch">
         <input
           type="checkbox"
@@ -99,12 +91,12 @@
           bind:checked={autoScanOnPageLoad}
           on:change={saveAutoScan}
         />
-        <span class="slider round"></span>
+        <span class="slider"></span>
       </label>
     </div>
 
     <div class="setting-item">
-      <label for="scan-https">Scan only HTTPS</label>
+      <span class="label-text">Scan only HTTPS</span>
       <label class="switch">
         <input
           type="checkbox"
@@ -112,24 +104,20 @@
           bind:checked={scanOnlyHttps}
           on:change={saveScanOnlyHttps}
         />
-        <span class="slider round"></span>
+        <span class="slider"></span>
       </label>
     </div>
   </section>
 
   <section class="setting-group compact-group" aria-labelledby="about-header">
     <h2 id="about-header">About</h2>
-
     <div class="setting-item static-item">
       <span>Version</span>
       <span>1.0.0</span>
     </div>
-
-    <div class="setting-item static-item about-dev-row">
+    <div class="setting-item static-item">
       <span>Developed by</span>
-      <span class="about-dev-value"
-        >Caitlyn Ross | University of Johannesburg</span
-      >
+      <span>Caitlyn Ross | University of Johannesburg</span>
     </div>
   </section>
 </main>
@@ -244,20 +232,6 @@
     padding: 8px 10px 0 10px;
     margin-top: 0;
     margin-bottom: 0;
-  }
-  .clear-data-button {
-    background-color: #dc3545;
-    color: white;
-    padding: 6px 0;
-    border: none;
-    border-radius: 3px;
-    cursor: pointer;
-    width: 100%;
-    font-size: 0.95em;
-    transition: background-color 0.2s ease;
-  }
-  .clear-data-button:hover {
-    background-color: #c82333;
   }
   .compact-group {
     margin-top: 8px;

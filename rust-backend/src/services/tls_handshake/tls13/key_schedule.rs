@@ -11,14 +11,10 @@ use hmac::{Hmac, Mac};
 use ring::hkdf::{KeyType, Prk};
 use sha2::{Digest, Sha256, Sha384};
 
-// ============================================================================
+// ==================================================
 // PUBLIC KEY DERIVATION FUNCTIONS
-// ============================================================================
 
 /// Derives TLS 1.3 handshake traffic secrets from shared secret and transcript
-///
-/// RFC 8446 Section 7.1: Handshake traffic secrets are derived from the handshake secret,
-/// which is computed by extracting the shared secret with the early secret's derived value.
 pub fn derive_tls13_handshake_traffic_secrets_dynamic(
     shared_secret: &[u8],
     transcript: &TranscriptHash,
@@ -69,10 +65,7 @@ pub fn derive_tls13_handshake_traffic_secrets_dynamic(
     Ok((client_hs_traffic_secret, server_hs_traffic_secret))
 }
 
-/// Derives TLS 1.3 application traffic secrets from shared secret and transcript
-///
-/// RFC 8446 Section 7.1: Application traffic secrets are derived from the master secret,
-/// which is computed by extracting zero with the handshake secret's derived value.
+/// Derives TLS 1.3 application traffic secrets from shared secret and transcript.
 pub fn derive_tls13_application_traffic_secrets(
     shared_secret: &[u8],
     transcript: &TranscriptHash,
@@ -133,10 +126,6 @@ pub fn derive_tls13_application_traffic_secrets(
 }
 
 /// Derives TLS 1.3 finished key and verifies the Finished message
-///
-/// RFC 8446 Section 4.4.4:
-/// - finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
-/// - verify_data = HMAC(finished_key, Transcript-Hash(Handshake Context))
 pub fn derive_tls13_finished_key_and_verify(
     traffic_secret: &[u8],
     transcript_hash: &[u8],
@@ -252,13 +241,6 @@ fn compute_hmac_verify_data(
 }
 
 /// Constructs the TLS 1.3 HKDFLabel structure per RFC 8446
-///
-/// HKDFLabel Structure:
-/// - length: u16 (2 bytes)
-/// - label_length: u8 (1 byte)  
-/// - label: [u8] (variable length)
-/// - context_length: u8 (1 byte)
-/// - context: [u8] (variable length)
 fn build_hkdf_label(length: u16, label: &[u8], context: &[u8]) -> Vec<u8> {
     let mut hkdf_label = Vec::with_capacity(2 + 1 + label.len() + 1 + context.len());
 
