@@ -13,8 +13,9 @@ use ring::rand::{SecureRandom, SystemRandom};
 use std::io::Write;
 use std::net::TcpStream;
 
-// =================
-// CONNECTION STATE
+//Connect to a server and perform a full TLS 1.3 handshake
+// This includes key exchange, certificate processing, and traffic secret derivation
+// Returns the connection state and optionally the server certificate
 
 #[allow(dead_code)]
 pub struct Tls13ConnectionState {

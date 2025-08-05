@@ -118,7 +118,6 @@ impl AssessmentData {
 
 // ====================================
 // MAIN ASSESSMENT HANDLER
-// ====================================
 
 /// Main entry point for TLS domain assessment
 pub async fn assess_domain(

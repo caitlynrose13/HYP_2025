@@ -5,6 +5,9 @@ use std::time::SystemTime;
 
 use crate::services::errors::TlsError;
 
+//checks if a server's certificate chain is valid and matches the hostname
+//uses webpki for certificate validation and hostname matching
+
 // Validates a server's certificate chain and hostname
 pub fn validate_server_certificate(
     server_certificates_der: &[Vec<u8>],

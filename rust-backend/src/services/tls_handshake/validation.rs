@@ -29,6 +29,10 @@ const SIG_ALG_RSA_PSS_PSS_SHA256: [u8; 2] = [0x08, 0x09];
 const SIG_ALG_RSA_PSS_PSS_SHA384: [u8; 2] = [0x08, 0x0a];
 const SIG_ALG_RSA_PSS_PSS_SHA512: [u8; 2] = [0x08, 0x0b];
 
+//Implements TLS certificate and signature validation
+//provides functions for verifying server key exchange signatures,
+//(can the server prove it has the private key corresponding to the public key in the certificate?)
+
 // ============================================================================
 // PUBLIC API FUNCTIONS
 

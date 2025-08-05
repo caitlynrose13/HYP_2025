@@ -476,10 +476,6 @@ fn tls12_prf_p_hash(
 }
 
 /// P_hash implementation using SHA-256
-///
-/// RFC 5246: P_hash(secret, seed) = HMAC_hash(secret, A(1) + seed) +
-///                                  HMAC_hash(secret, A(2) + seed) + ...
-/// where A(0) = seed, A(i) = HMAC_hash(secret, A(i-1))
 fn tls12_prf_p_hash_sha256(secret: &[u8], seed: &[u8], output: &mut [u8]) -> Result<(), String> {
     let mut a_i = seed.to_vec();
     let mut current_output_len = 0;
@@ -540,12 +536,6 @@ fn tls12_prf_p_hash_sha384(secret: &[u8], seed: &[u8], output: &mut [u8]) -> Res
 }
 
 /// Builds the HKDFLabel structure for TLS 1.3
-///
-/// RFC 8446: struct {
-///     uint16 length = Length;
-///     opaque label<7..255> = "tls13 " + Label;
-///     opaque context<0..255> = Context;
-/// } HKDFLabel;
 fn build_hkdf_label(length: u16, label: &[u8], context: &[u8]) -> Vec<u8> {
     let mut hkdf_label = Vec::with_capacity(2 + 1 + label.len() + 1 + context.len());
 

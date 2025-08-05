@@ -12,8 +12,10 @@ use std::io::{Cursor, Read};
 use std::net::TcpStream;
 use std::time::Duration;
 
-// ===========================
-// CORE MESSAGE BUILDER
+//It provides all the logic needed for a custom TLS 1.2 client
+//to initiate, negotiate, and process a secure handshake with a server.
+
+//record contains the content tyle (if it is a handshake message or alert), the version and payload,
 
 pub struct HandshakeMessage;
 

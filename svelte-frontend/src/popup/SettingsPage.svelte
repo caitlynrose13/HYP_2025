@@ -19,6 +19,8 @@
   }
 
   // Save settings to localStorage
+
+  //when user toggles dark mode, save the preference, updates theme store, and applies the theme
   function saveDarkMode() {
     localStorage.setItem("darkMode", isDarkMode.toString());
     theme.set(isDarkMode ? "dark" : "light");

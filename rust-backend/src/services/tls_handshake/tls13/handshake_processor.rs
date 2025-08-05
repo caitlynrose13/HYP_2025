@@ -13,8 +13,13 @@ const MAX_CONSECUTIVE_DECRYPT_FAILURES: usize = 3;
 const MAX_ALTERNATIVE_SEQUENCES: u64 = 5;
 const MAX_TLS_RECORD_SIZE: usize = 16384;
 
-// Add a static buffer for fragmented handshake messages
 static HANDSHAKE_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+//Processes the encrypted handshake records after the ServerHello message in a TLS 1.3 handshake
+// It reads records from the stream, decrypts them, and processes handshake messages
+// It handles ChangeCipherSpec, Alert, Handshake, and ApplicationData records
+// It verifies the Finished message from the server and updates the transcript hash
+// Returns a vector of decrypted TLS records or an error if the handshake fails
 
 // ======================================================
 // MAIN PROCESSING FUNCTION

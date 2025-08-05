@@ -1,19 +1,10 @@
-//! TLS 1.3 Message Construction
-//!
-//! This module provides functions for building TLS 1.3 handshake messages,
-//! particularly ClientHello messages with proper extension ordering and
-//! RFC 8446 compliance.
-
+//TLS 1.3 Message Construction
 use crate::services::tls_parser::{
     EXTENSION_TYPE_KEY_SHARE, EXTENSION_TYPE_SERVER_NAME, EXTENSION_TYPE_SIGNATURE_ALGORITHMS,
     EXTENSION_TYPE_SUPPORTED_GROUPS, EXTENSION_TYPE_SUPPORTED_VERSIONS, Extension,
     HandshakeMessageType, NamedGroup, SNI_HOSTNAME_TYPE, TlsContentType, TlsVersion,
 };
 use rand::RngCore;
-
-// ============================================================================
-// CONSTANTS
-// ============================================================================
 
 /// PSK Key Exchange Modes extension type (RFC 8446)
 const EXTENSION_TYPE_PSK_KEY_EXCHANGE_MODES: u16 = 0x002D;
@@ -51,14 +42,13 @@ const SIGNATURE_ALGORITHMS: &[[u8; 2]] = &[
     [0x06, 0x01], // rsa_pkcs1_sha512
 ];
 
-// ============================================================================
+//Constructs the TLS1.3 messages required for a ClientHello
+// This includes the ClientHello handshake message and the TLS record layer wrapper
+
+// ======================================
 // PUBLIC API FUNCTIONS
-// ============================================================================
 
 /// Builds a complete TLS record containing a ClientHello handshake message
-///
-/// This function creates a TLS 1.3 ClientHello message wrapped in a TLS record
-/// with the legacy version (TLS 1.2) for compatibility with middleboxes.
 pub fn build_client_hello(domain: &str, client_random: &[u8; 32], x25519_pubkey: &[u8]) -> Vec<u8> {
     let raw_client_hello_handshake_message =
         build_raw_client_hello_handshake(domain, client_random, x25519_pubkey);
@@ -79,11 +69,6 @@ pub fn build_client_hello(domain: &str, client_random: &[u8; 32], x25519_pubkey:
 }
 
 /// Builds the raw ClientHello handshake message (without TLS record wrapper)
-///
-/// Creates a TLS 1.3 ClientHello message according to RFC 8446 with:
-/// - Proper extension ordering
-/// - Maximum compatibility cipher suites
-/// - Required TLS 1.3 extensions
 pub fn build_raw_client_hello_handshake(
     domain: &str,
     client_random: &[u8; 32],
@@ -104,11 +89,6 @@ pub fn build_raw_client_hello_handshake(
 }
 
 /// Creates a handshake message with proper header formatting
-///
-/// Formats a handshake message with:
-/// - Message type (1 byte)
-/// - Message length (3 bytes, big-endian)
-/// - Message payload
 pub fn handshake_message_with_header(msg_type: u8, payload: &[u8]) -> Vec<u8> {
     create_handshake_message_with_header_from_type(msg_type, payload)
 }

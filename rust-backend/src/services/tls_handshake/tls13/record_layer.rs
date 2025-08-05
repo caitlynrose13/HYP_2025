@@ -1,5 +1,4 @@
 // TLS 1.3 record layer encryption/decryption
-
 use crate::services::errors::TlsError;
 use crate::services::tls_parser::CipherSuite;
 use aes_gcm::aead::generic_array::GenericArray;
@@ -8,6 +7,9 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
 };
 use chacha20poly1305::ChaCha20Poly1305;
+
+//implements the TLS 1.3 record layer encryption and decryption
+//provides functions for deriving keys, computing nonces, and decrypting records
 
 // ====================
 // NONCE COMPUTATION

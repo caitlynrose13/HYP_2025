@@ -11,7 +11,12 @@ use hmac::{Hmac, Mac};
 use ring::hkdf::{KeyType, Prk};
 use sha2::{Digest, Sha256, Sha384};
 
-// ==================================================
+//this module provides functions for deriving TLS 1.3 keys and verifying finished messages
+//handles both handshake and application traffic secrets
+
+// (logic for deriving keys and verifying finished messages)
+
+// ========================================
 // PUBLIC KEY DERIVATION FUNCTIONS
 
 /// Derives TLS 1.3 handshake traffic secrets from shared secret and transcript
