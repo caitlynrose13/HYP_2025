@@ -1,5 +1,6 @@
 use crate::AppState;
 use crate::services::certificate_parser::parse_certificate;
+use crate::services::http_security_checker::check_http_security;
 use crate::services::openssl_probe::{test_tls10, test_tls11};
 use crate::services::security_grader::{Grade, GradeInput};
 use crate::services::tls_parser::TlsVersion;
@@ -21,9 +22,26 @@ pub struct AssessmentResponse {
     pub cipher_suites: CipherSuiteInfo,
     pub vulnerabilities: VulnerabilityInfo,
     pub key_exchange: KeyExchangeInfo,
+    pub whois_info: Option<DomainWhoisInfo>,
+    pub security_warnings: SecurityWarnings, // Add this line if missing
     pub message: String,
     pub explanation: String,
     pub tls_scan_duration: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct SecurityWarnings {
+    pub is_phishing_suspicious: bool,
+    pub phishing_risk_score: u32,
+    pub warning_message: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct DomainWhoisInfo {
+    pub creation_date: Option<String>,
+    pub domain_age_days: Option<i64>,
+    pub registrar: Option<String>,
+    pub status: String,
 }
 
 // ====================================
@@ -111,6 +129,12 @@ impl AssessmentData {
                 forward_secrecy: false,
                 weak_protocols_disabled: true,
                 ocsp_stapling_enabled: false,
+
+                https_redirect: false,
+                csp_header: false,
+                x_frame_options: false,
+                x_content_type_options: false,
+                expect_ct: false,
             },
         }
     }
@@ -136,7 +160,7 @@ pub async fn assess_domain(
     println!("Domain: {}", domain);
     println!(
         "Timestamp: {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC") //LIBARY!!!!
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
 
     // Initialize assessment data
@@ -144,7 +168,89 @@ pub async fn assess_domain(
 
     // Perform security checks
     assessment_data.grade_input.hsts = check_hsts_support(domain).await;
+
+    // NEW: Check HTTP security headers
+    if let Ok(http_security) = check_http_security(domain).await {
+        assessment_data.grade_input.https_redirect = http_security.https_redirect;
+        assessment_data.grade_input.csp_header = http_security.csp_header;
+        assessment_data.grade_input.x_frame_options = http_security.x_frame_options;
+        assessment_data.grade_input.x_content_type_options = http_security.x_content_type_options;
+        assessment_data.grade_input.expect_ct = http_security.expect_ct;
+
+        println!("HTTP Security Check Results:");
+        println!("  HTTPS Redirect: {}", http_security.https_redirect);
+        println!("  CSP Header: {}", http_security.csp_header);
+        println!("  X-Frame-Options: {}", http_security.x_frame_options);
+        println!(
+            "  X-Content-Type-Options: {}",
+            http_security.x_content_type_options
+        );
+        println!("  Expect-CT: {}", http_security.expect_ct);
+    } else {
+        println!("HTTP security check failed, using defaults (false)");
+    }
+
     assess_tls_protocols(domain, &mut assessment_data).await;
+
+    // ADD THIS DEBUG SECTION HERE
+    println!("=== GRADE INPUT DEBUG ===");
+    println!("TLS Protocol Support:");
+    println!(
+        "  tls13_supported: {}",
+        assessment_data.grade_input.tls13_supported
+    );
+    println!(
+        "  tls12_supported: {}",
+        assessment_data.grade_input.tls12_supported
+    );
+    println!(
+        "  tls11_supported: {}",
+        assessment_data.grade_input.tls11_supported
+    );
+    println!(
+        "  tls10_supported: {}",
+        assessment_data.grade_input.tls10_supported
+    );
+    println!("Certificate Status:");
+    println!("  cert_valid: {}", assessment_data.grade_input.cert_valid);
+    println!(
+        "  cert_expired: {}",
+        assessment_data.grade_input.cert_expired
+    );
+    println!(
+        "  cert_key_strength_ok: {}",
+        assessment_data.grade_input.cert_key_strength_ok
+    );
+    println!("Security Features:");
+    println!("  hsts: {}", assessment_data.grade_input.hsts);
+    println!(
+        "  forward_secrecy: {}",
+        assessment_data.grade_input.forward_secrecy
+    );
+    println!(
+        "  weak_protocols_disabled: {}",
+        assessment_data.grade_input.weak_protocols_disabled
+    );
+    println!(
+        "  ocsp_stapling_enabled: {}",
+        assessment_data.grade_input.ocsp_stapling_enabled
+    );
+    println!("HTTP Security Headers:");
+    println!(
+        "  https_redirect: {}",
+        assessment_data.grade_input.https_redirect
+    );
+    println!("  csp_header: {}", assessment_data.grade_input.csp_header);
+    println!(
+        "  x_frame_options: {}",
+        assessment_data.grade_input.x_frame_options
+    );
+    println!(
+        "  x_content_type_options: {}",
+        assessment_data.grade_input.x_content_type_options
+    );
+    println!("  expect_ct: {}", assessment_data.grade_input.expect_ct);
+    println!("=== END GRADE INPUT DEBUG ===");
 
     // Calculate final grade and explanation
     let whois_resp = crate::services::security_grader::whois_query(domain).ok();
@@ -159,7 +265,60 @@ pub async fn assess_domain(
         whois_resp.as_deref(),
     );
 
-    println!("Final Grade: {:?}", grade);
+    // Process WHOIS information for display
+    let whois_info = if let Some(ref whois_resp_str) = whois_resp {
+        Some(extract_whois_info_for_display(whois_resp_str))
+    } else {
+        None
+    };
+
+    // NEW: Perform phishing analysis
+    let phishing_analysis = perform_phishing_analysis(domain).await;
+
+    // Apply phishing grade override if necessary
+    let (final_grade, mut final_explanation) = if phishing_analysis.should_override_grade() {
+        let (phishing_grade, phishing_explanation) = phishing_analysis.grade_impact();
+        (phishing_grade, phishing_explanation)
+    } else {
+        (
+            grade,
+            explanation
+                .clone()
+                .unwrap_or_else(|| "No issues found".to_string()),
+        )
+    };
+
+    // Combine explanations if we have both technical and phishing issues
+    if phishing_analysis.is_suspicious && explanation.is_some() {
+        final_explanation = format!(
+            "{} PHISHING WARNING: {}",
+            explanation.unwrap_or_default(),
+            phishing_analysis.content_warnings.join(" ")
+        );
+    }
+
+    // Generate security warnings for frontend
+    let security_warnings = generate_security_warnings(&phishing_analysis);
+
+    println!("Final Grade: {:?}", final_grade);
+    println!("Grade Explanation: {}", final_explanation);
+    if let Some(ref whois) = whois_info {
+        println!("Domain Age: {:?} days", whois.domain_age_days);
+        println!("Domain Creation Date: {:?}", whois.creation_date);
+    }
+    if phishing_analysis.is_suspicious {
+        println!(
+            "🚨 PHISHING ALERT: Risk Score {}/100",
+            phishing_analysis.risk_score
+        );
+        println!(
+            "Detected Patterns: {:?}",
+            phishing_analysis.detected_patterns.len()
+        );
+        if let Some(ref warning) = security_warnings.warning_message {
+            println!("Frontend Warning: {}", warning);
+        }
+    }
     println!("=== Assessment Complete ===\n");
 
     // Store results and prepare response
@@ -167,9 +326,9 @@ pub async fn assess_domain(
     store_scan_result(
         &state,
         domain,
-        &grade,
+        &final_grade,
         &assessment_data,
-        &explanation,
+        &Some(final_explanation.clone()),
         &scan_duration_str,
     )
     .await;
@@ -178,14 +337,16 @@ pub async fn assess_domain(
         StatusCode::OK,
         Json(AssessmentResponse {
             domain: domain.to_string(),
-            grade,
+            grade: final_grade,
             certificate: assessment_data.certificate_info,
             protocols: assessment_data.protocols,
             cipher_suites: assessment_data.cipher_suites,
             vulnerabilities: assessment_data.vulnerabilities,
             key_exchange: assessment_data.key_exchange,
+            whois_info,
+            security_warnings, // Keep this - simplified version for frontend
             message: get_assessment_message(&assessment_data.grade_input),
-            explanation: explanation.unwrap_or_else(|| "No issues found".to_string()),
+            explanation: final_explanation,
             tls_scan_duration: scan_duration_str,
         }),
     )
@@ -222,6 +383,13 @@ async fn check_cached_scan(
 
             let grade = parse_grade_from_string(&recent_scan.grade);
 
+            // Create default security warnings for cached results (assume safe)
+            let default_security_warnings = SecurityWarnings {
+                is_phishing_suspicious: false,
+                phishing_risk_score: 0,
+                warning_message: None,
+            };
+
             Some((
                 StatusCode::OK,
                 Json(AssessmentResponse {
@@ -232,6 +400,8 @@ async fn check_cached_scan(
                     cipher_suites,
                     vulnerabilities,
                     key_exchange,
+                    whois_info: None, // Cached scans don't store WHOIS info yet
+                    security_warnings: default_security_warnings,
                     message: "Cached result (no new assessment needed)".to_string(),
                     explanation: recent_scan
                         .explanation
@@ -431,6 +601,18 @@ fn process_certificate(
     grade_input: &mut GradeInput,
 ) {
     if let Ok(parsed_cert) = parse_certificate(cert_der) {
+        println!("=== CERTIFICATE DEBUG ===");
+        println!("Certificate Subject: {}", parsed_cert.subject);
+        println!("Certificate Issuer: {}", parsed_cert.issuer);
+        println!("Certificate Expired: {}", parsed_cert.expired);
+        if let Some(ref key_size) = parsed_cert.key_size {
+            println!("Key Size: {}", key_size);
+        } else {
+            println!("Key Size: None");
+        }
+        println!("Signature Algorithm: {}", parsed_cert.signature_algorithm);
+        println!("=== END CERTIFICATE DEBUG ===");
+
         cert_info.common_name = Some(parsed_cert.subject.clone());
         cert_info.issuer = Some(parsed_cert.issuer.clone());
         cert_info.valid_from = Some(parsed_cert.not_before.clone());
@@ -449,32 +631,93 @@ fn process_certificate(
         grade_input.cert_valid = !parsed_cert.expired;
         grade_input.cert_expired = parsed_cert.expired;
 
-        // Key strength logic: RSA >= 2048, EC >= 256
-        grade_input.cert_key_strength_ok = false;
+        // FIXED Key strength logic with proper debugging
+        grade_input.cert_key_strength_ok = false; // Start with false
+
         if let Some(ref key_size_str) = cert_info.key_size {
+            println!("Checking key strength for: {}", key_size_str);
+
             if let Ok(bits) = key_size_str.parse::<u32>() {
-                // EC keys typically 256, 384, 521; RSA should be >= 2048
-                if cert_info
-                    .signature_algorithm
-                    .as_ref()
-                    .map_or(false, |alg| alg.contains("RSA"))
-                {
-                    if bits >= 2048 {
-                        grade_input.cert_key_strength_ok = true;
+                println!("Parsed key size: {} bits", bits);
+
+                if let Some(ref sig_alg) = cert_info.signature_algorithm {
+                    println!("Signature algorithm: {}", sig_alg);
+
+                    // Check for RSA
+                    if sig_alg.contains("RSA") {
+                        if bits >= 2048 {
+                            grade_input.cert_key_strength_ok = true;
+                            println!("✅ RSA key strength OK (>= 2048 bits)");
+                        } else {
+                            println!("❌ RSA key strength WEAK (< 2048 bits)");
+                        }
                     }
-                } else if cert_info
-                    .signature_algorithm
-                    .as_ref()
-                    .map_or(false, |alg| alg.contains("ECDSA") || alg.contains("EC"))
-                {
-                    if bits >= 256 {
-                        grade_input.cert_key_strength_ok = true;
+                    // Check for ECDSA/EC or known ECDSA OIDs
+                    else if sig_alg.contains("ECDSA")
+                        || sig_alg.contains("EC")
+                        || sig_alg == "1.2.840.10045.4.3.2"
+                        || sig_alg == "1.2.840.10045.4.3.3"
+                        || sig_alg == "1.2.840.10045.4.3.4"
+                    {
+                        let required_bits = if sig_alg == "1.2.840.10045.4.3.3" {
+                            384 // ECDSA-SHA384
+                        } else if sig_alg == "1.2.840.10045.4.3.4" {
+                            521 // ECDSA-SHA512
+                        } else {
+                            256 // ECDSA-SHA256 or general EC
+                        };
+
+                        if bits >= required_bits {
+                            grade_input.cert_key_strength_ok = true;
+                            println!("✅ ECDSA/EC key strength OK (>= {} bits)", required_bits);
+                        } else {
+                            grade_input.cert_key_strength_ok = false;
+                            println!("❌ ECDSA/EC key strength WEAK (< {} bits)", required_bits);
+                        }
                     }
+                    // Unknown algorithm - assume WEAK for security (don't be lenient with phishing sites)
+                    else {
+                        grade_input.cert_key_strength_ok = false;
+                        println!(
+                            "❌ Unknown signature algorithm '{}', assuming key strength WEAK (security-first approach)",
+                            sig_alg
+                        );
+                    }
+                } else {
+                    // No signature algorithm info - assume WEAK for security
+                    grade_input.cert_key_strength_ok = false;
+                    println!(
+                        "❌ No signature algorithm information, assuming key strength WEAK (security-first approach)"
+                    );
                 }
+            } else {
+                // Can't parse key size - assume WEAK for security
+                grade_input.cert_key_strength_ok = false;
+                println!(
+                    "❌ Failed to parse key size '{}', assuming key strength WEAK (security-first approach)",
+                    key_size_str
+                );
             }
+        } else {
+            // No key size info - assume WEAK for security
+            grade_input.cert_key_strength_ok = false;
+            println!(
+                "❌ No key size information available, assuming key strength WEAK (security-first approach)"
+            );
         }
 
+        println!(
+            "Final cert_key_strength_ok: {}",
+            grade_input.cert_key_strength_ok
+        );
+
         calculate_days_until_expiry(cert_info);
+    } else {
+        println!("=== CERTIFICATE PARSING FAILED ===");
+        println!("Failed to parse certificate DER data");
+        grade_input.cert_valid = false;
+        grade_input.cert_expired = true;
+        grade_input.cert_key_strength_ok = false;
     }
 }
 
@@ -606,4 +849,179 @@ fn get_assessment_message(grade_input: &GradeInput) -> String {
     } else {
         "TLS assessment completed".to_string()
     }
+}
+
+/// Generate simple security warning flag for frontend display
+fn generate_security_warnings(
+    phishing_analysis: &crate::services::phishing_detector::PhishingAnalysis,
+) -> SecurityWarnings {
+    // Simple threshold check - flag if 65% or higher risk
+    let is_suspicious = phishing_analysis.risk_score >= 65;
+
+    let warning_message = if is_suspicious {
+        Some(format!(
+            "PHISHING RISK DETECTED ({}% confidence). This site shows suspicious patterns commonly used by fraudulent websites. Avoid entering personal information.",
+            phishing_analysis.risk_score
+        ))
+    } else {
+        None
+    };
+
+    SecurityWarnings {
+        is_phishing_suspicious: is_suspicious,
+        phishing_risk_score: phishing_analysis.risk_score,
+        warning_message,
+    }
+}
+
+/// Perform phishing analysis on a domain
+async fn perform_phishing_analysis(
+    domain: &str,
+) -> crate::services::phishing_detector::PhishingAnalysis {
+    // Try to fetch the homepage content for analysis
+    let page_content = fetch_page_content(domain).await;
+
+    crate::services::phishing_detector::analyze_for_phishing(domain, page_content.as_deref())
+}
+
+/// Fetch page content for phishing analysis
+async fn fetch_page_content(domain: &str) -> Option<String> {
+    // Try HTTPS first, then HTTP
+    let urls = [format!("https://{}", domain), format!("http://{}", domain)];
+
+    for url in &urls {
+        if let Ok(response) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()?
+            .get(url)
+            .send()
+            .await
+        {
+            if response.status().is_success() {
+                if let Ok(content) = response.text().await {
+                    println!(
+                        "Fetched content from {} for phishing analysis ({} chars)",
+                        url,
+                        content.len()
+                    );
+                    return Some(content);
+                }
+            }
+        }
+    }
+
+    println!(
+        "Could not fetch content from {} for phishing analysis",
+        domain
+    );
+    None
+}
+
+/// Extract WHOIS information for API display
+fn extract_whois_info_for_display(whois_response: &str) -> DomainWhoisInfo {
+    // Parse the WHOIS response using the existing parser
+    let parsed_whois = parse_whois_response_local(whois_response);
+
+    let (creation_date_str, domain_age_days) = if let Some(creation) = parsed_whois.creation_date {
+        let now = chrono::Utc::now().naive_utc();
+        let age_days = (now - creation).num_days();
+        (
+            Some(creation.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+            Some(age_days),
+        )
+    } else {
+        (None, None)
+    };
+
+    let status = if let Some(age) = domain_age_days {
+        if age < 30 {
+            "Very New Domain (< 30 days)".to_string()
+        } else if age < 90 {
+            "New Domain (< 90 days)".to_string()
+        } else if age < 365 {
+            "Young Domain (< 1 year)".to_string()
+        } else {
+            "Established Domain".to_string()
+        }
+    } else {
+        "Unknown Age".to_string()
+    };
+
+    DomainWhoisInfo {
+        creation_date: creation_date_str,
+        domain_age_days,
+        registrar: parsed_whois.registrar,
+        status,
+    }
+}
+
+/// Local WHOIS parser (duplicated from security_grader for now)
+fn parse_whois_response_local(response: &str) -> LocalWhoisInfo {
+    let creation_date = extract_creation_date_local(response);
+    let registrar = extract_registrar_local(response);
+
+    LocalWhoisInfo {
+        creation_date,
+        registrar,
+    }
+}
+
+struct LocalWhoisInfo {
+    creation_date: Option<chrono::NaiveDateTime>,
+    registrar: Option<String>,
+}
+
+fn extract_creation_date_local(response: &str) -> Option<chrono::NaiveDateTime> {
+    let date_patterns = [
+        "creation date",
+        "created:",
+        "registered:",
+        "created on:",
+        "domain registered:",
+    ];
+
+    for line in response.lines() {
+        let line_lower = line.to_lowercase();
+
+        for pattern in &date_patterns {
+            if line_lower.contains(pattern) {
+                if let Some(idx) = line.find(':') {
+                    let date_str = line[idx + 1..].trim();
+
+                    // Try multiple date formats
+                    let formats = [
+                        "%Y-%m-%dT%H:%M:%SZ",
+                        "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%d",
+                        "%d-%m-%Y",
+                        "%m/%d/%Y",
+                        "%Y/%m/%d",
+                        "%d.%m.%Y",
+                    ];
+
+                    for format in &formats {
+                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(date_str, format) {
+                            return Some(dt);
+                        }
+                        if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, format) {
+                            return Some(date.and_hms_opt(0, 0, 0)?);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_registrar_local(response: &str) -> Option<String> {
+    for line in response.lines() {
+        if line.to_lowercase().contains("registrar:") {
+            if let Some(idx) = line.find(':') {
+                return Some(line[idx + 1..].trim().to_string());
+            }
+        }
+    }
+    None
 }

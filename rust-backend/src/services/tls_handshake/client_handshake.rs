@@ -1,10 +1,9 @@
-//! TLS 1.2 Client Handshake Implementation
-//!
-//! This module provides a complete TLS 1.2 client handshake implementation with support for:
-//! - ECDHE key exchange
-//! - AES-GCM cipher suites
-//! - Certificate validation
-//! - Handshake message parsing and verification
+//TLS 1.2 Client Handshake Implementation
+//This module provides a complete TLS 1.2 client handshake implementation with support for:
+//ECDHE key exchange
+//AES-GCM cipher suites
+//Certificate validation
+//Handshake message parsing and verification
 
 use crate::services::errors::TlsError;
 use crate::services::tls_handshake::keys;
@@ -26,9 +25,6 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
-
-// ======================
-// TYPES AND STRUCTURES
 
 /// TLS security level classification
 #[derive(Debug, Clone, PartialEq)]

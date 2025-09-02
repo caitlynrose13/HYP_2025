@@ -33,6 +33,13 @@ pub struct GradeInput {
     pub forward_secrecy: bool,
     pub weak_protocols_disabled: bool,
     pub ocsp_stapling_enabled: bool,
+
+    // NEW HTTP Security Headers
+    pub https_redirect: bool,
+    pub csp_header: bool,
+    pub x_frame_options: bool,
+    pub x_content_type_options: bool,
+    pub expect_ct: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +169,7 @@ pub fn grade_site(input: &GradeInput, _certificate: &CertificateInfo) -> (Grade,
     apply_protocol_penalties(&mut score, &mut reasons, input); //apply penalities
     apply_certificate_penalties(&mut score, &mut reasons, input);
     apply_security_feature_penalties(&mut score, &mut reasons, input);
+    apply_http_security_penalties(&mut score, &mut reasons, input);
 
     let mut grade = calculate_grade_from_score(score); //match score to grade
 
@@ -376,6 +384,34 @@ fn apply_security_feature_penalties(
     if !input.ocsp_stapling_enabled {
         *score -= 5;
         reasons.push("OCSP Stapling is not enabled.".to_string());
+    }
+}
+
+fn apply_http_security_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &GradeInput) {
+    // HTTP Security Headers (Mozilla comparison)
+    if !input.https_redirect {
+        *score -= 10;
+        reasons.push("HTTP does not redirect to HTTPS.".to_string());
+    }
+
+    if !input.csp_header {
+        *score -= 8;
+        reasons.push("Content Security Policy (CSP) header is missing.".to_string());
+    }
+
+    if !input.x_frame_options {
+        *score -= 5;
+        reasons.push("X-Frame-Options header is missing (clickjacking protection).".to_string());
+    }
+
+    if !input.x_content_type_options {
+        *score -= 3;
+        reasons.push("X-Content-Type-Options header is missing.".to_string());
+    }
+
+    if !input.expect_ct {
+        *score -= 2;
+        reasons.push("Expect-CT header is missing (Certificate Transparency).".to_string());
     }
 }
 

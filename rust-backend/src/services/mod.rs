@@ -1,8 +1,10 @@
 pub mod certificate_parser;
 pub mod certificate_validator;
 pub mod errors;
+pub mod http_security_checker;
 pub mod mozilla_observatory;
 pub mod openssl_probe;
+pub mod phishing_detector;
 pub mod security_grader;
 pub mod ssllabs;
 pub mod tls_handshake;

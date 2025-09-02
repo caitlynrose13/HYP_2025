@@ -50,6 +50,12 @@
     return null;
   })();
 
+  // Add phishing detection check
+  $: isPhishingDetected = (() => {
+    if (!tlsReportData || !tlsReportData.security_warnings) return false;
+    return tlsReportData.security_warnings.is_phishing_suspicious;
+  })();
+
   interface TlsReportData {
     domain: string;
     message: string;
@@ -88,6 +94,11 @@
       supports_forward_secrecy: boolean;
       key_exchange_algorithm?: string;
       curve_name?: string;
+    };
+    security_warnings?: {
+      is_phishing_suspicious: boolean;
+      phishing_risk_score: number;
+      warning_message?: string;
     };
   }
 
@@ -239,6 +250,25 @@
         {#if loading && !result && !error}
           <p>Loading analysis for {domain}...</p>
         {:else if tlsReportData}
+          <!-- ADD THIS: Phishing Warning Display -->
+          {#if isPhishingDetected}
+            <div class="phishing-warning">
+              <div class="warning-icon">🚨</div>
+              <div class="warning-content">
+                <h3>Suspicious Website Detected</h3>
+                <p class="risk-score">
+                  Risk Score: {tlsReportData.security_warnings
+                    .phishing_risk_score}%
+                </p>
+                <p>{tlsReportData.security_warnings.warning_message}</p>
+                <p class="warning-advice">
+                  <strong>⚠️ AVOID:</strong> Do not enter personal information, passwords,
+                  or make purchases on this site.
+                </p>
+              </div>
+            </div>
+          {/if}
+
           <GradeCard
             grade={tlsReportData.grade ?? "?"}
             summary={tlsReportData.message}
@@ -327,5 +357,74 @@
     padding: 10px;
     background-color: var(--card-background-color);
     overflow-y: visible;
+  }
+
+  .phishing-warning {
+    background: linear-gradient(135deg, #dc2626, #991b1b);
+    border: 3px solid #ef4444;
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    color: white;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    box-shadow: 0 6px 20px rgba(220, 38, 38, 0.4);
+    animation: pulse-warning 2s ease-in-out infinite;
+  }
+
+  .warning-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .warning-content {
+    flex-grow: 1;
+  }
+
+  .warning-content h3 {
+    margin: 0 0 8px 0;
+    font-size: 1.1em;
+    font-weight: bold;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  .risk-score {
+    font-weight: bold;
+    font-size: 0.9em !important;
+    margin: 6px 0 !important;
+    padding: 3px 6px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    display: inline-block;
+  }
+
+  .warning-content p {
+    margin: 8px 0;
+    font-size: 0.9em;
+    line-height: 1.4;
+  }
+
+  .warning-advice {
+    margin-top: 12px !important;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    border-left: 4px solid #fbbf24;
+    font-weight: bold;
+    font-size: 0.85em !important;
+  }
+
+  @keyframes pulse-warning {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.9;
+      transform: scale(1.01);
+    }
   }
 </style>

@@ -64,7 +64,8 @@ hyper = "0.14"
 rand_core = "0.9.3"
 chacha20poly1305 = "0.10"
 generic-array = "0.14.7"
-reqwest = { version = "0.12.22", features = ["json", "blocking"] }
+reqwest = { version = "0.12.22", features = ["json", "blocking", "stream"] }
 url = "2.5.4"
 openssl = "0.10.73"
+regex = "1.10"
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls"] }

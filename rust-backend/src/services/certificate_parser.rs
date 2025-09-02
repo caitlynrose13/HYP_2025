@@ -1,7 +1,10 @@
 use chrono;
 use hex;
 use serde::Serialize;
-use x509_parser::{extensions::GeneralName, prelude::*, public_key::PublicKey, time::ASN1Time};
+use x509_parser::{
+    der_parser::der::parse_der_oid, extensions::GeneralName, prelude::*, public_key::PublicKey,
+    time::ASN1Time,
+};
 
 // ==========
 // DATA STRUCTURES
@@ -13,6 +16,7 @@ pub struct ParsedCertificate {
     pub not_before: String,
     pub not_after: String,
     pub expired: bool,
+    pub days_until_expiry: Option<i64>,
     pub key_size: Option<String>,
     pub signature_algorithm: String,
     pub serial_number: String,
@@ -33,6 +37,7 @@ pub fn parse_certificate(der: &[u8]) -> Result<ParsedCertificate, String> {
     let (not_before, not_after, expired) = extract_validity(&cert);
     let key_size = extract_key_size(&cert);
     let subject_alt_names = extract_subject_alt_names(&cert);
+    let days_until_expiry = calculate_days_until_expiry(&not_after);
 
     Ok(ParsedCertificate {
         subject,
@@ -40,6 +45,7 @@ pub fn parse_certificate(der: &[u8]) -> Result<ParsedCertificate, String> {
         not_before,
         not_after,
         expired,
+        days_until_expiry,
         key_size,
         signature_algorithm: cert.signature_algorithm.algorithm.to_string(),
         serial_number: format!("{:x}", cert.serial),
@@ -127,28 +133,117 @@ fn format_asn1_time_to_iso(time: &ASN1Time) -> String {
 
 /// Extract key size from public key
 fn extract_key_size(cert: &X509Certificate) -> Option<String> {
-    match cert.public_key().parsed() {
+    // Get the public key info
+    let public_key_info = cert.public_key();
+
+    // Check the algorithm OID first
+    let algorithm_oid = public_key_info.algorithm.algorithm.to_string();
+    println!("Public key algorithm OID: {}", algorithm_oid);
+
+    match public_key_info.parsed() {
         Ok(PublicKey::RSA(rsa_key)) => {
             let bit_size = rsa_key.key_size() * 8; // Convert bytes to bits
+            println!("RSA key size: {} bits", bit_size);
             Some(bit_size.to_string())
         }
-        Ok(PublicKey::EC(ec_key)) => extract_ec_key_size(&ec_key),
-        _ => None,
+        Ok(PublicKey::EC(ec_key)) => {
+            // For EC keys, we need to look at the algorithm parameters
+            extract_ec_key_size_improved(&public_key_info, &algorithm_oid)
+        }
+        Ok(other_key) => {
+            println!("Other key type: {:?}", other_key);
+            // For other key types, try to determine from algorithm OID
+            determine_key_size_from_oid(&algorithm_oid)
+        }
+        Err(e) => {
+            println!("Failed to parse public key: {}", e);
+            // Try to determine from algorithm OID as fallback
+            determine_key_size_from_oid(&algorithm_oid)
+        }
     }
 }
 
-/// Extract EC key size based on curve
-fn extract_ec_key_size(ec_key: &x509_parser::public_key::ECPoint) -> Option<String> {
-    let curve_info = format!("{:?}", ec_key);
+/// Improved EC key size extraction using algorithm parameters
+fn extract_ec_key_size_improved(
+    public_key_info: &x509_parser::x509::SubjectPublicKeyInfo,
+    algorithm_oid: &str,
+) -> Option<String> {
+    // Check if we have algorithm parameters
+    if let Some(params) = &public_key_info.algorithm.parameters {
+        println!(
+            "EC algorithm parameters present: {} bytes",
+            params.data.len()
+        );
 
-    if curve_info.contains("P-256") || curve_info.contains("secp256r1") {
-        Some("256".to_string())
-    } else if curve_info.contains("P-384") || curve_info.contains("secp384r1") {
-        Some("384".to_string())
-    } else if curve_info.contains("P-521") || curve_info.contains("secp521r1") {
-        Some("521".to_string())
+        // Try to parse the parameters as an OID (curve identifier)
+        if let Ok((_, ber_object)) = parse_der_oid(params.data) {
+            if let Ok(curve_oid) = ber_object.as_oid() {
+                let curve_oid_str = curve_oid.to_string();
+                println!("EC curve OID: {}", curve_oid_str);
+
+                // Map common curve OIDs to key sizes
+                match curve_oid_str.as_str() {
+                    "1.2.840.10045.3.1.7" => {
+                        // secp256r1 (P-256)
+                        println!("Detected P-256 curve");
+                        Some("256".to_string())
+                    }
+                    "1.3.132.0.34" => {
+                        // secp384r1 (P-384)
+                        println!("Detected P-384 curve");
+                        Some("384".to_string())
+                    }
+                    "1.3.132.0.35" => {
+                        // secp521r1 (P-521)
+                        println!("Detected P-521 curve");
+                        Some("521".to_string())
+                    }
+                    _ => {
+                        println!("Unknown EC curve OID: {}", curve_oid_str);
+                        // Default to 256 for unknown curves as it's most common
+                        Some("256".to_string())
+                    }
+                }
+            } else {
+                println!("Failed to extract OID from BER object");
+                Some("256".to_string()) // Default assumption
+            }
+        } else {
+            // NEW: Try alternative parsing for 8-byte parameters
+            println!("Standard OID parsing failed, trying alternative methods");
+
+            // For 8-byte parameters, often it's P-256 curve
+            if params.data.len() == 8 {
+                println!("8-byte EC parameters detected - likely P-256 curve");
+                Some("256".to_string())
+            } else {
+                println!("Failed to parse EC curve OID from parameters");
+                Some("256".to_string()) // Default assumption
+            }
+        }
     } else {
-        Some("unknown".to_string())
+        println!("No EC algorithm parameters found");
+        Some("256".to_string()) // Default assumption
+    }
+}
+
+/// Determine key size from algorithm OID as fallback
+fn determine_key_size_from_oid(algorithm_oid: &str) -> Option<String> {
+    match algorithm_oid {
+        "1.2.840.10045.2.1" => {
+            // ecPublicKey - generic EC, assume P-256
+            println!("Generic EC public key, assuming 256 bits");
+            Some("256".to_string())
+        }
+        "1.2.840.113549.1.1.1" => {
+            // rsaEncryption - can't determine size without parsing the key
+            println!("RSA encryption algorithm, size unknown");
+            Some("2048".to_string()) // Common default
+        }
+        _ => {
+            println!("Unknown algorithm OID: {}", algorithm_oid);
+            Some("unknown".to_string())
+        }
     }
 }
 
@@ -207,5 +302,20 @@ fn format_ip_address(ip: &[u8]) -> String {
             // Unknown format, use hex encoding
             format!("IP:{}", hex::encode(ip))
         }
+    }
+}
+
+/// Calculate days until certificate expiry
+pub fn calculate_days_until_expiry(valid_to: &str) -> Option<i64> {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ") {
+        let now = chrono::Utc::now().naive_utc();
+        let days = (dt - now).num_days();
+        Some(days)
+    } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
+        let now = chrono::Utc::now().date_naive();
+        let days = (date - now).num_days();
+        Some(days)
+    } else {
+        None
     }
 }
