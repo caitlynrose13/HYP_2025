@@ -11,6 +11,17 @@ pub struct ScanRecord {
     pub domain: String,
     pub scanned_by: String,
     pub grade: String,
+    // NEW: Individual service grades
+    pub ssl_labs_grade: Option<String>,
+    pub mozilla_observatory_grade: Option<String>,
+    pub tls_analyzer_grade: Option<String>,
+    pub ssl_labs_scan_time: Option<f64>,
+    pub mozilla_scan_time: Option<f64>,
+    pub tls_scan_time: Option<f64>,
+    pub ssl_labs_error: Option<String>,
+    pub mozilla_error: Option<String>,
+    pub tls_error: Option<String>,
+    // Existing fields
     pub scan_time: String,
     pub certificate_json: String,
     pub protocols_json: String,
@@ -29,6 +40,9 @@ pub struct ScanRecord {
 pub struct SecurityTimelineEntry {
     pub scan_time: String,
     pub grade: String,
+    pub ssl_labs_grade: Option<String>,
+    pub mozilla_observatory_grade: Option<String>,
+    pub tls_analyzer_grade: Option<String>,
     pub certificate_summary: Option<String>,
     pub protocols_summary: Option<String>,
     pub key_vulnerabilities: Option<String>,
@@ -45,6 +59,17 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             domain TEXT NOT NULL,
             scanned_by TEXT NOT NULL,
             grade TEXT NOT NULL,
+            -- NEW: Individual service grades and timings
+            ssl_labs_grade TEXT,
+            mozilla_observatory_grade TEXT,
+            tls_analyzer_grade TEXT,
+            ssl_labs_scan_time REAL,
+            mozilla_scan_time REAL,
+            tls_scan_time REAL,
+            ssl_labs_error TEXT,
+            mozilla_error TEXT,
+            tls_error TEXT,
+            -- Existing fields
             scan_time DATETIME NOT NULL,
             certificate_json TEXT NOT NULL,
             protocols_json TEXT NOT NULL,
@@ -63,6 +88,9 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT NOT NULL,
             grade TEXT NOT NULL,
+            ssl_labs_grade TEXT,
+            mozilla_observatory_grade TEXT,
+            tls_analyzer_grade TEXT,
             scan_time DATETIME NOT NULL,
             is_phishing_detected BOOLEAN
         );
@@ -71,6 +99,9 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT NOT NULL,
             grade TEXT NOT NULL,
+            ssl_labs_grade TEXT,
+            mozilla_observatory_grade TEXT,
+            tls_analyzer_grade TEXT,
             scan_time DATETIME NOT NULL,
             certificate_summary TEXT,
             protocols_summary TEXT,   
@@ -111,6 +142,17 @@ pub async fn insert_scan(
     domain: &str,
     scanned_by: &str,
     grade: &str,
+    // NEW: Individual service results
+    ssl_labs_grade: Option<&str>,
+    mozilla_observatory_grade: Option<&str>,
+    tls_analyzer_grade: Option<&str>,
+    ssl_labs_scan_time: Option<f64>,
+    mozilla_scan_time: Option<f64>,
+    tls_scan_time: Option<f64>,
+    ssl_labs_error: Option<&str>,
+    mozilla_error: Option<&str>,
+    tls_error: Option<&str>,
+    // Existing parameters
     certificate_json: &str,
     protocols_json: &str,
     cipher_suites_json: &str,
@@ -119,7 +161,6 @@ pub async fn insert_scan(
     explanation: Option<&str>,
     tls_scan_duration: Option<&str>,
     details_json: &str,
-    // NEW: Add phishing parameters
     is_phishing_detected: Option<bool>,
     phishing_risk_score: Option<i32>,
     phishing_warning_message: Option<&str>,
@@ -128,16 +169,28 @@ pub async fn insert_scan(
         r#"
         INSERT INTO scan_records (
             domain, scanned_by, grade, scan_time,
+            ssl_labs_grade, mozilla_observatory_grade, tls_analyzer_grade,
+            ssl_labs_scan_time, mozilla_scan_time, tls_scan_time,
+            ssl_labs_error, mozilla_error, tls_error,
             certificate_json, protocols_json, cipher_suites_json,
             vulnerabilities_json, key_exchange_json, explanation, 
             tls_scan_duration, details_json,
             is_phishing_detected, phishing_risk_score, phishing_warning_message
-        ) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(domain)
     .bind(scanned_by)
     .bind(grade)
+    .bind(ssl_labs_grade)
+    .bind(mozilla_observatory_grade)
+    .bind(tls_analyzer_grade)
+    .bind(ssl_labs_scan_time)
+    .bind(mozilla_scan_time)
+    .bind(tls_scan_time)
+    .bind(ssl_labs_error)
+    .bind(mozilla_error)
+    .bind(tls_error)
     .bind(certificate_json)
     .bind(protocols_json)
     .bind(cipher_suites_json)
@@ -153,10 +206,18 @@ pub async fn insert_scan(
     .await?;
 
     sqlx::query(
-        "INSERT INTO domain_grade_history (domain, grade, scan_time, is_phishing_detected) VALUES (?, ?, datetime('now'), ?)"
+        r#"
+        INSERT INTO domain_grade_history (
+            domain, grade, ssl_labs_grade, mozilla_observatory_grade, 
+            tls_analyzer_grade, scan_time, is_phishing_detected
+        ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+        "#,
     )
     .bind(domain)
     .bind(grade)
+    .bind(ssl_labs_grade)
+    .bind(mozilla_observatory_grade)
+    .bind(tls_analyzer_grade)
     .bind(is_phishing_detected)
     .execute(pool)
     .await?;
@@ -170,9 +231,15 @@ pub async fn insert_scan(
 pub async fn cleanup_old_scans(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let archived = sqlx::query(
         r#"
-        INSERT INTO scan_archive (domain, grade, scan_time, certificate_summary, protocols_summary, key_vulnerabilities, explanation, is_phishing_detected, phishing_risk_score)
+        INSERT INTO scan_archive (
+            domain, grade, ssl_labs_grade, mozilla_observatory_grade, 
+            tls_analyzer_grade, scan_time, certificate_summary, 
+            protocols_summary, key_vulnerabilities, explanation, 
+            is_phishing_detected, phishing_risk_score
+        )
         SELECT 
-            domain, grade, scan_time,
+            domain, grade, ssl_labs_grade, mozilla_observatory_grade, 
+            tls_analyzer_grade, scan_time,
             CASE 
                 WHEN certificate_json LIKE '%"common_name"%' THEN 
                     json_extract(certificate_json, '$.common_name') || ' (expires: ' || json_extract(certificate_json, '$.valid_to') || ')'
@@ -223,10 +290,12 @@ pub async fn get_domain_security_timeline(
 
     let query = format!(
         r#"
-        SELECT scan_time, grade, certificate_summary, protocols_summary, key_vulnerabilities
+        SELECT scan_time, grade, ssl_labs_grade, mozilla_observatory_grade, 
+               tls_analyzer_grade, certificate_summary, protocols_summary, key_vulnerabilities
         FROM scan_archive WHERE domain = ?
         UNION ALL
-        SELECT scan_time, grade, 
+        SELECT scan_time, grade, ssl_labs_grade, mozilla_observatory_grade, 
+               tls_analyzer_grade,
                'Recent scan' as certificate_summary,
                'Recent scan' as protocols_summary,
                'Recent scan' as key_vulnerabilities
@@ -246,9 +315,23 @@ pub async fn get_domain_security_timeline(
 pub async fn get_grade_trend(
     pool: &SqlitePool,
     domain: &str,
-) -> Result<Vec<(String, String)>, sqlx::Error> {
+) -> Result<
+    Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    sqlx::Error,
+> {
     let records = sqlx::query(
-        "SELECT scan_time, grade FROM domain_grade_history WHERE domain = ? ORDER BY scan_time ASC",
+        r#"
+        SELECT scan_time, grade, ssl_labs_grade, mozilla_observatory_grade, tls_analyzer_grade 
+        FROM domain_grade_history 
+        WHERE domain = ? 
+        ORDER BY scan_time ASC
+        "#,
     )
     .bind(domain)
     .fetch_all(pool)
@@ -259,7 +342,10 @@ pub async fn get_grade_trend(
         .map(|row| {
             let scan_time: String = row.get("scan_time");
             let grade: String = row.get("grade");
-            (scan_time, grade)
+            let ssl_labs_grade: Option<String> = row.get("ssl_labs_grade");
+            let mozilla_grade: Option<String> = row.get("mozilla_observatory_grade");
+            let tls_grade: Option<String> = row.get("tls_analyzer_grade");
+            (scan_time, grade, ssl_labs_grade, mozilla_grade, tls_grade)
         })
         .collect())
 }
@@ -272,6 +358,17 @@ pub async fn handle_scan_request(
     domain: String,
     scanned_by: String,
     grade: String,
+    // NEW: Individual service results
+    ssl_labs_grade: Option<String>,
+    mozilla_observatory_grade: Option<String>,
+    tls_analyzer_grade: Option<String>,
+    ssl_labs_scan_time: Option<f64>,
+    mozilla_scan_time: Option<f64>,
+    tls_scan_time: Option<f64>,
+    ssl_labs_error: Option<String>,
+    mozilla_error: Option<String>,
+    tls_error: Option<String>,
+    // Existing parameters
     certificate_json: String,
     protocols_json: String,
     cipher_suites_json: String,
@@ -289,6 +386,15 @@ pub async fn handle_scan_request(
         &domain,
         &scanned_by,
         &grade,
+        ssl_labs_grade.as_deref(),
+        mozilla_observatory_grade.as_deref(),
+        tls_analyzer_grade.as_deref(),
+        ssl_labs_scan_time,
+        mozilla_scan_time,
+        tls_scan_time,
+        ssl_labs_error.as_deref(),
+        mozilla_error.as_deref(),
+        tls_error.as_deref(),
         &certificate_json,
         &protocols_json,
         &cipher_suites_json,
@@ -297,7 +403,6 @@ pub async fn handle_scan_request(
         explanation.as_deref(),
         Some(&scan_duration_str),
         &details_json,
-        // NEW: Add the missing phishing parameters
         is_phishing_detected,
         phishing_risk_score,
         phishing_warning_message.as_deref(),

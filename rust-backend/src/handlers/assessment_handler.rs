@@ -1,5 +1,5 @@
 use crate::AppState;
-use crate::services::certificate_parser::parse_certificate;
+use crate::services::certificate_parser::{calculate_days_until_expiry, parse_certificate}; // Add this function import
 use crate::services::http_security_checker::check_http_security;
 use crate::services::openssl_probe::{test_tls10, test_tls11};
 use crate::services::security_grader::{Grade, GradeInput};
@@ -264,6 +264,10 @@ pub async fn assess_domain(
         &assessment_data.key_exchange,
         whois_resp.as_deref(),
     );
+    println!("=== GRADING DEBUG ===");
+    println!("Initial Grade (before phishing): {:?}", grade);
+    println!("Initial Explanation: {:?}", explanation);
+    println!("=== END GRADING DEBUG ===");
 
     // Process WHOIS information for display
     let whois_info = if let Some(ref whois_resp_str) = whois_resp {
@@ -275,10 +279,76 @@ pub async fn assess_domain(
     // NEW: Perform phishing analysis
     let phishing_analysis = perform_phishing_analysis(domain).await;
 
-    // Apply phishing grade override if necessary
-    let (final_grade, mut final_explanation) = if phishing_analysis.should_override_grade() {
-        let (phishing_grade, phishing_explanation) = phishing_analysis.grade_impact();
-        (phishing_grade, phishing_explanation)
+    // Apply phishing grade override with better logic
+    let (final_grade, mut final_explanation) = if phishing_analysis.is_suspicious {
+        let risk_score = phishing_analysis.risk_score;
+
+        match risk_score {
+            90..=100 => {
+                // Very high risk - definitely override to F
+                (
+                    Grade::F,
+                    "CRITICAL PHISHING RISK: This site is highly likely to be fraudulent."
+                        .to_string(),
+                )
+            }
+            80..=89 => {
+                // High risk - override to F but note TLS quality
+                (
+                    Grade::F,
+                    format!(
+                        "HIGH PHISHING RISK ({}%): Site appears fraudulent despite good TLS security.",
+                        risk_score
+                    ),
+                )
+            }
+            70..=79 => {
+                // Moderate-high risk - downgrade significantly but not to F if TLS is excellent
+                if matches!(grade, Grade::APlus | Grade::A) {
+                    (
+                        Grade::C,
+                        format!(
+                            "MODERATE PHISHING RISK ({}%): TLS security is good but site shows suspicious patterns.",
+                            risk_score
+                        ),
+                    )
+                } else {
+                    (
+                        Grade::F,
+                        format!(
+                            "MODERATE PHISHING RISK ({}%): Combined with weak TLS security.",
+                            risk_score
+                        ),
+                    )
+                }
+            }
+            60..=69 => {
+                // Moderate risk - minor downgrade only
+                let downgraded_grade = match grade {
+                    Grade::APlus => Grade::A,
+                    Grade::A => Grade::B,
+                    Grade::B => Grade::C,
+                    other => other, // Don't improve grades
+                };
+                (
+                    downgraded_grade,
+                    format!(
+                        "LOW-MODERATE PHISHING RISK ({}%): Site shows some suspicious patterns.",
+                        risk_score
+                    ),
+                )
+            }
+            _ => {
+                // Low risk - just warn, don't change grade
+                (
+                    grade,
+                    format!(
+                        "LOW PHISHING RISK ({}%): Minor suspicious patterns detected.",
+                        risk_score
+                    ),
+                )
+            }
+        }
     } else {
         (
             grade,
@@ -287,6 +357,13 @@ pub async fn assess_domain(
                 .unwrap_or_else(|| "No issues found".to_string()),
         )
     };
+
+    println!("=== PHISHING IMPACT DEBUG ===");
+    println!("Pre-phishing grade: {:?}", grade);
+    println!("Phishing risk score: {}", phishing_analysis.risk_score);
+    println!("Phishing suspicious: {}", phishing_analysis.is_suspicious);
+    println!("Final grade after phishing analysis: {:?}", final_grade);
+    println!("=== END PHISHING IMPACT DEBUG ===");
 
     // Combine explanations if we have both technical and phishing issues
     if phishing_analysis.is_suspicious && explanation.is_some() {
@@ -644,118 +721,66 @@ fn process_certificate(
         grade_input.cert_valid = !parsed_cert.expired;
         grade_input.cert_expired = parsed_cert.expired;
 
-        // FIXED Key strength logic with proper debugging
-        grade_input.cert_key_strength_ok = false; // Start with false
-
-        if let Some(ref key_size_str) = cert_info.key_size {
-            println!("Checking key strength for: {}", key_size_str);
-
-            if let Ok(bits) = key_size_str.parse::<u32>() {
-                println!("Parsed key size: {} bits", bits);
-
-                if let Some(ref sig_alg) = cert_info.signature_algorithm {
-                    println!("Signature algorithm: {}", sig_alg);
-
-                    // Check for RSA
-                    if sig_alg.contains("RSA") {
-                        if bits >= 2048 {
-                            grade_input.cert_key_strength_ok = true;
-                            println!("✅ RSA key strength OK (>= 2048 bits)");
-                        } else {
-                            println!("❌ RSA key strength WEAK (< 2048 bits)");
-                        }
-                    }
-                    // Check for ECDSA/EC or known ECDSA OIDs
-                    else if sig_alg.contains("ECDSA")
-                        || sig_alg.contains("EC")
-                        || sig_alg == "1.2.840.10045.4.3.2"
-                        || sig_alg == "1.2.840.10045.4.3.3"
-                        || sig_alg == "1.2.840.10045.4.3.4"
-                    {
-                        let required_bits = if sig_alg == "1.2.840.10045.4.3.3" {
-                            384 // ECDSA-SHA384
-                        } else if sig_alg == "1.2.840.10045.4.3.4" {
-                            521 // ECDSA-SHA512
-                        } else {
-                            256 // ECDSA-SHA256 or general EC
-                        };
-
-                        if bits >= required_bits {
-                            grade_input.cert_key_strength_ok = true;
-                            println!("✅ ECDSA/EC key strength OK (>= {} bits)", required_bits);
-                        } else {
-                            grade_input.cert_key_strength_ok = false;
-                            println!("❌ ECDSA/EC key strength WEAK (< {} bits)", required_bits);
-                        }
-                    }
-                    // Unknown algorithm - assume WEAK for security (don't be lenient with phishing sites)
-                    else {
-                        grade_input.cert_key_strength_ok = false;
-                        println!(
-                            "❌ Unknown signature algorithm '{}', assuming key strength WEAK (security-first approach)",
-                            sig_alg
-                        );
-                    }
-                } else {
-                    // No signature algorithm info - assume WEAK for security
-                    grade_input.cert_key_strength_ok = false;
-                    println!(
-                        "❌ No signature algorithm information, assuming key strength WEAK (security-first approach)"
-                    );
-                }
-            } else {
-                // Can't parse key size - assume WEAK for security
-                grade_input.cert_key_strength_ok = false;
-                println!(
-                    "❌ Failed to parse key size '{}', assuming key strength WEAK (security-first approach)",
-                    key_size_str
-                );
-            }
-        } else {
-            // No key size info - assume WEAK for security
-            grade_input.cert_key_strength_ok = false;
-            println!(
-                "❌ No key size information available, assuming key strength WEAK (security-first approach)"
-            );
-        }
+        // IMPROVED: Separate key strength from signature algorithm validation
+        grade_input.cert_key_strength_ok = validate_key_strength(&parsed_cert);
 
         println!(
             "Final cert_key_strength_ok: {}",
             grade_input.cert_key_strength_ok
         );
 
-        calculate_days_until_expiry(cert_info);
+        // FIX: calculate_days_until_expiry only takes 1 argument and returns the days
+        if let Some(ref valid_to) = cert_info.valid_to {
+            cert_info.days_until_expiry = calculate_days_until_expiry(valid_to);
+        }
     } else {
         println!("=== CERTIFICATE PARSING FAILED ===");
-        println!("Failed to parse certificate DER data");
         grade_input.cert_valid = false;
         grade_input.cert_expired = true;
         grade_input.cert_key_strength_ok = false;
     }
 }
 
-/// Calculate days until certificate expiry
-fn calculate_days_until_expiry(cert_info: &mut CertificateInfo) {
-    if let Some(valid_to) = &cert_info.valid_to {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%S%F{UTC}")
-        {
-            let now = chrono::Utc::now().naive_utc();
-            let days = (dt - now).num_days();
-            cert_info.days_until_expiry = Some(days);
-        } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
-            let now = chrono::Utc::now().date_naive();
-            let days = (date - now).num_days();
-            cert_info.days_until_expiry = Some(days);
-        } else {
-            cert_info.days_until_expiry = None;
-        }
-    } else {
-        cert_info.days_until_expiry = None;
-    }
-}
+fn validate_key_strength(
+    parsed_cert: &crate::services::certificate_parser::ParsedCertificate,
+) -> bool {
+    let Some(key_size_str) = &parsed_cert.key_size else {
+        println!("⚠️  No key size information - assuming acceptable");
+        return true; // Be lenient for missing info
+    };
 
-// ====================================
-// VULNERABILITY ASSESSMENT
+    let Ok(bits) = key_size_str.parse::<u32>() else {
+        println!(
+            "⚠️  Cannot parse key size '{}' - assuming acceptable",
+            key_size_str
+        );
+        return true; // Be lenient for parsing issues
+    };
+
+    // REALISTIC THRESHOLDS: Only flag truly weak keys
+    let is_acceptable = match bits {
+        // Clearly weak keys
+        0..=127 => {
+            println!("❌ Key strength WEAK ({} bits - too small)", bits);
+            false
+        }
+        // Acceptable range (covers both ECDSA and RSA)
+        128..=10240 => {
+            println!("✅ Key strength OK ({} bits)", bits);
+            true
+        }
+        // Unusually large but probably fine
+        _ => {
+            println!(
+                "✅ Key strength OK ({} bits - unusually large but acceptable)",
+                bits
+            );
+            true
+        }
+    };
+
+    is_acceptable
+}
 
 /// Assess common TLS vulnerabilities based on protocol support
 fn assess_vulnerabilities(data: &mut AssessmentData) {
@@ -846,6 +871,16 @@ async fn store_scan_result(
         domain,
         "anonymous",
         &format!("{:?}", grade),
+        // NEW: Individual service grades (not available in TLS-only assessment)
+        None,                                                  // ssl_labs_grade
+        None,                                                  // mozilla_observatory_grade
+        Some(&format!("{:?}", grade)), // tls_analyzer_grade (use same as overall grade for now)
+        None,                          // ssl_labs_scan_time
+        None,                          // mozilla_scan_time
+        Some(scan_duration_str.parse::<f64>().unwrap_or(0.0)), // tls_scan_time
+        None,                          // ssl_labs_error
+        None,                          // mozilla_error
+        None,                          // tls_error
         &certificate_json,
         &protocols_json,
         &cipher_suites_json,
@@ -877,21 +912,12 @@ fn parse_grade_from_string(grade_str: &str) -> Grade {
     }
 }
 
-/// Generate assessment completion message
-fn get_assessment_message(grade_input: &GradeInput) -> String {
-    if !grade_input.tls12_supported && !grade_input.tls13_supported {
-        "TLS assessment completed with limited support".to_string()
-    } else {
-        "TLS assessment completed".to_string()
-    }
-}
-
 /// Generate simple security warning flag for frontend display
 fn generate_security_warnings(
     phishing_analysis: &crate::services::phishing_detector::PhishingAnalysis,
 ) -> SecurityWarnings {
-    // Simple threshold check - flag if 65% or higher risk
-    let is_suspicious = phishing_analysis.risk_score >= 65;
+    //  Only show warning for higher risk scores
+    let is_suspicious = phishing_analysis.risk_score >= 75;
 
     let warning_message = if is_suspicious {
         Some(format!(

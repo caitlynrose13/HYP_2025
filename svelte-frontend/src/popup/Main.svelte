@@ -50,16 +50,16 @@
     return null;
   })();
 
-  // Add phishing detection check
-  $: isPhishingDetected = (() => {
-    if (!tlsReportData || !tlsReportData.security_warnings) return false;
-    return tlsReportData.security_warnings.is_phishing_suspicious;
-  })();
+  $: isPhishingDetected =
+    !!tlsReportData?.security_warnings?.is_phishing_suspicious;
+  $: phishingRiskScore =
+    tlsReportData?.security_warnings?.phishing_risk_score || 0;
 
   interface TlsReportData {
     domain: string;
     message: string;
     grade: string;
+    explanation: string;
     certificate: {
       common_name: string;
       issuer: string;
@@ -250,20 +250,20 @@
         {#if loading && !result && !error}
           <p>Loading analysis for {domain}...</p>
         {:else if tlsReportData}
-          <!-- ADD THIS: Phishing Warning Display -->
+          <!-- Phishing Warning - only shows if backend detects phishing -->
           {#if isPhishingDetected}
             <div class="phishing-warning">
               <div class="warning-icon">🚨</div>
               <div class="warning-content">
-                <h3>Suspicious Website Detected</h3>
-                <p class="risk-score">
-                  Risk Score: {tlsReportData.security_warnings
-                    .phishing_risk_score}%
+                <h3>⚠️ PHISHING SITE DETECTED</h3>
+                <p class="risk-score">Risk Score: {phishingRiskScore}%</p>
+                <p>
+                  {tlsReportData.security_warnings?.warning_message ||
+                    "This website has been identified as potentially fraudulent."}
                 </p>
-                <p>{tlsReportData.security_warnings.warning_message}</p>
                 <p class="warning-advice">
-                  <strong>⚠️ AVOID:</strong> Do not enter personal information, passwords,
-                  or make purchases on this site.
+                  <strong>🛑 DO NOT:</strong> Enter personal information, passwords,
+                  or credit card details.
                 </p>
               </div>
             </div>
@@ -282,8 +282,6 @@
             certExpiryDays={certExpiryDays ?? 0}
             onViewDetailedReport={goToReport}
           />
-        {:else if error}
-          <p class="error">{error}</p>
         {/if}
       </div>
     {/if}
@@ -309,21 +307,7 @@
     text-align: center;
     flex-grow: 1;
   }
-  .main-content {
-    padding: 24px 10px 32px 10px;
-    min-height: 70vh;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-start;
-  }
-  .security-overview-heading {
-    font-size: 1.18em;
-    font-weight: 700;
-    margin: 0 0 1em 0;
-    color: var(--text-color);
-    text-align: left;
-    letter-spacing: 0.5px;
-  }
+
   .menu-button {
     background: none;
     border: none;
