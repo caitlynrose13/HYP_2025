@@ -20,6 +20,9 @@ pub struct ScanRecord {
     pub explanation: Option<String>,
     pub tls_scan_duration: Option<String>,
     pub details_json: String,
+    pub is_phishing_detected: Option<bool>,
+    pub phishing_risk_score: Option<i32>,
+    pub phishing_warning_message: Option<String>,
 }
 
 #[derive(Debug, FromRow, Serialize)]
@@ -50,14 +53,18 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             key_exchange_json TEXT NOT NULL,
             explanation TEXT,
             tls_scan_duration TEXT,
-            details_json TEXT NOT NULL
+            details_json TEXT NOT NULL,
+            is_phishing_detected BOOLEAN,
+            phishing_risk_score INTEGER,
+            phishing_warning_message TEXT
         );
         
         CREATE TABLE IF NOT EXISTS domain_grade_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT NOT NULL,
             grade TEXT NOT NULL,
-            scan_time DATETIME NOT NULL
+            scan_time DATETIME NOT NULL,
+            is_phishing_detected BOOLEAN
         );
         
         CREATE TABLE IF NOT EXISTS scan_archive (
@@ -68,7 +75,9 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             certificate_summary TEXT,
             protocols_summary TEXT,   
             key_vulnerabilities TEXT,
-            explanation TEXT
+            explanation TEXT,
+            is_phishing_detected BOOLEAN,
+            phishing_risk_score INTEGER
         );
         "#,
     )
@@ -110,6 +119,10 @@ pub async fn insert_scan(
     explanation: Option<&str>,
     tls_scan_duration: Option<&str>,
     details_json: &str,
+    // NEW: Add phishing parameters
+    is_phishing_detected: Option<bool>,
+    phishing_risk_score: Option<i32>,
+    phishing_warning_message: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -117,8 +130,9 @@ pub async fn insert_scan(
             domain, scanned_by, grade, scan_time,
             certificate_json, protocols_json, cipher_suites_json,
             vulnerabilities_json, key_exchange_json, explanation, 
-            tls_scan_duration, details_json
-        ) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)
+            tls_scan_duration, details_json,
+            is_phishing_detected, phishing_risk_score, phishing_warning_message
+        ) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(domain)
@@ -132,14 +146,18 @@ pub async fn insert_scan(
     .bind(explanation)
     .bind(tls_scan_duration)
     .bind(details_json)
+    .bind(is_phishing_detected)
+    .bind(phishing_risk_score)
+    .bind(phishing_warning_message)
     .execute(pool)
     .await?;
 
     sqlx::query(
-        "INSERT INTO domain_grade_history (domain, grade, scan_time) VALUES (?, ?, datetime('now'))"
+        "INSERT INTO domain_grade_history (domain, grade, scan_time, is_phishing_detected) VALUES (?, ?, datetime('now'), ?)"
     )
     .bind(domain)
     .bind(grade)
+    .bind(is_phishing_detected)
     .execute(pool)
     .await?;
 
@@ -152,7 +170,7 @@ pub async fn insert_scan(
 pub async fn cleanup_old_scans(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let archived = sqlx::query(
         r#"
-        INSERT INTO scan_archive (domain, grade, scan_time, certificate_summary, protocols_summary, key_vulnerabilities, explanation)
+        INSERT INTO scan_archive (domain, grade, scan_time, certificate_summary, protocols_summary, key_vulnerabilities, explanation, is_phishing_detected, phishing_risk_score)
         SELECT 
             domain, grade, scan_time,
             CASE 
@@ -170,7 +188,9 @@ pub async fn cleanup_old_scans(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 WHEN vulnerabilities_json LIKE '%"Vulnerable"%' THEN 'Has vulnerabilities'
                 ELSE 'No known vulnerabilities'
             END,
-            explanation
+            explanation,
+            is_phishing_detected,
+            phishing_risk_score
         FROM scan_records 
         WHERE scan_time < datetime('now', '-7 days')
         "#,
@@ -260,6 +280,9 @@ pub async fn handle_scan_request(
     explanation: Option<String>,
     scan_duration_str: String,
     details_json: String,
+    is_phishing_detected: Option<bool>,
+    phishing_risk_score: Option<i32>,
+    phishing_warning_message: Option<String>,
 ) {
     match insert_scan(
         &state.pool,
@@ -274,6 +297,10 @@ pub async fn handle_scan_request(
         explanation.as_deref(),
         Some(&scan_duration_str),
         &details_json,
+        // NEW: Add the missing phishing parameters
+        is_phishing_detected,
+        phishing_risk_score,
+        phishing_warning_message.as_deref(),
     )
     .await
     {

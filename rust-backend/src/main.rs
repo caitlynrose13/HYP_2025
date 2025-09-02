@@ -9,12 +9,17 @@ use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-pub mod db;
-
 #[tokio::main]
-async fn main() -> Result<(), sqlx::Error> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("TLS Assessment Backend Server");
     println!("Ready to assess domains via /assess endpoint");
+
+    // Create database file if it doesn't exist
+    let db_path = "scans.db";
+    if !std::path::Path::new(db_path).exists() {
+        std::fs::File::create(db_path)?;
+        println!("Created new database file: {}", db_path);
+    }
 
     // Set up CORS for local dev
     let cors = CorsLayer::new()
@@ -22,19 +27,23 @@ async fn main() -> Result<(), sqlx::Error> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Initialize the database
-    let pool = SqlitePool::connect("sqlite://f:/HYP_2025/rust-backend/scans.db").await?;
-    db::init_db(&pool).await?;
+    // Connect to SQLite database
+    let pool = SqlitePool::connect(&format!("sqlite:{}", db_path)).await?;
+    println!("Connected to database successfully");
+
+    // Initialize database
+    rust_backend::db::init_db(&pool).await?;
+    println!("Database initialized successfully");
 
     // Clean up old scans immediately on startup
-    db::cleanup_old_scans(&pool).await?;
+    rust_backend::db::cleanup_old_scans(&pool).await?;
 
-    let app_state = AppState { pool: pool.clone() }; // Initialize AppState
+    let app_state = AppState { pool: pool.clone() };
 
     // Build the Axum app
     let app = Router::new()
-        .route("/assess", post(assess_domain)) //when a post is made, assess_domain is called
-        .route("/api/observatory", get(external_scan)) // when a get is made, external_scan is called
+        .route("/assess", post(assess_domain))
+        .route("/api/observatory", get(external_scan))
         .layer(cors)
         .with_state(app_state);
 

@@ -17,15 +17,15 @@ pub struct AssessmentRequest {
 pub struct AssessmentResponse {
     pub domain: String,
     pub grade: Grade,
+    pub explanation: String,
     pub certificate: CertificateInfo,
     pub protocols: ProtocolSupport,
     pub cipher_suites: CipherSuiteInfo,
     pub vulnerabilities: VulnerabilityInfo,
     pub key_exchange: KeyExchangeInfo,
     pub whois_info: Option<DomainWhoisInfo>,
-    pub security_warnings: SecurityWarnings, // Add this line if missing
+    pub security_warnings: SecurityWarnings,
     pub message: String,
-    pub explanation: String,
     pub tls_scan_duration: String,
 }
 
@@ -300,29 +300,11 @@ pub async fn assess_domain(
     // Generate security warnings for frontend
     let security_warnings = generate_security_warnings(&phishing_analysis);
 
-    println!("Final Grade: {:?}", final_grade);
-    println!("Grade Explanation: {}", final_explanation);
-    if let Some(ref whois) = whois_info {
-        println!("Domain Age: {:?} days", whois.domain_age_days);
-        println!("Domain Creation Date: {:?}", whois.creation_date);
-    }
-    if phishing_analysis.is_suspicious {
-        println!(
-            "🚨 PHISHING ALERT: Risk Score {}/100",
-            phishing_analysis.risk_score
-        );
-        println!(
-            "Detected Patterns: {:?}",
-            phishing_analysis.detected_patterns.len()
-        );
-        if let Some(ref warning) = security_warnings.warning_message {
-            println!("Frontend Warning: {}", warning);
-        }
-    }
-    println!("=== Assessment Complete ===\n");
+    // Calculate scan duration
+    let scan_duration = scan_start.elapsed();
+    let scan_duration_str = format!("{:.2}s", scan_duration.as_secs_f64());
 
-    // Store results and prepare response
-    let scan_duration_str = format!("{:.2}s", scan_start.elapsed().as_secs_f32());
+    // Store scan results in database
     store_scan_result(
         &state,
         domain,
@@ -330,23 +312,33 @@ pub async fn assess_domain(
         &assessment_data,
         &Some(final_explanation.clone()),
         &scan_duration_str,
+        &phishing_analysis, // Pass phishing analysis
     )
     .await;
+
+    println!("=== Assessment Complete ===");
+
+    // Determine message before moving security_warnings
+    let message = if security_warnings.is_phishing_suspicious {
+        "Security analysis completed - PHISHING DETECTED".to_string()
+    } else {
+        "Security analysis completed".to_string()
+    };
 
     (
         StatusCode::OK,
         Json(AssessmentResponse {
             domain: domain.to_string(),
             grade: final_grade,
+            explanation: final_explanation,
             certificate: assessment_data.certificate_info,
             protocols: assessment_data.protocols,
             cipher_suites: assessment_data.cipher_suites,
             vulnerabilities: assessment_data.vulnerabilities,
             key_exchange: assessment_data.key_exchange,
             whois_info,
-            security_warnings, // Keep this - simplified version for frontend
-            message: get_assessment_message(&assessment_data.grade_input),
-            explanation: final_explanation,
+            security_warnings, // Move happens here
+            message,           // Use pre-calculated message
             tls_scan_duration: scan_duration_str,
         }),
     )
@@ -365,7 +357,7 @@ async fn check_cached_scan(
     match crate::db::get_recent_scan(&state.pool, domain).await {
         Ok(Some(recent_scan)) => {
             println!(
-                "Found recent scan for {} from database! Skipping new assessment.",
+                "Found recent scan for {} from database! Using cached phishing data.",
                 domain
             );
 
@@ -383,29 +375,50 @@ async fn check_cached_scan(
 
             let grade = parse_grade_from_string(&recent_scan.grade);
 
-            // Create default security warnings for cached results (assume safe)
-            let default_security_warnings = SecurityWarnings {
-                is_phishing_suspicious: false,
-                phishing_risk_score: 0,
-                warning_message: None,
+            // NEW: Use cached phishing data instead of re-running analysis
+            let security_warnings = SecurityWarnings {
+                is_phishing_suspicious: recent_scan.is_phishing_detected.unwrap_or(false),
+                phishing_risk_score: recent_scan.phishing_risk_score.unwrap_or(0) as u32,
+                warning_message: recent_scan.phishing_warning_message.clone(),
+            };
+
+            // Use cached explanation and grade (no phishing override needed)
+            let final_explanation = recent_scan
+                .explanation
+                .unwrap_or_else(|| "No explanation".to_string());
+
+            // Log cached phishing status
+            if security_warnings.is_phishing_suspicious {
+                println!(
+                    "🚨 CACHED PHISHING ALERT: Risk Score {}/100",
+                    security_warnings.phishing_risk_score
+                );
+                if let Some(ref warning) = security_warnings.warning_message {
+                    println!("Cached Warning: {}", warning);
+                }
+            }
+
+            // Determine message before moving security_warnings
+            let message = if security_warnings.is_phishing_suspicious {
+                "Security analysis completed - PHISHING DETECTED".to_string()
+            } else {
+                "Security analysis completed".to_string()
             };
 
             Some((
                 StatusCode::OK,
                 Json(AssessmentResponse {
                     domain: domain.to_string(),
-                    grade,
+                    grade, // Use original cached grade
                     certificate: certificate_info,
                     protocols,
                     cipher_suites,
                     vulnerabilities,
                     key_exchange,
-                    whois_info: None, // Cached scans don't store WHOIS info yet
-                    security_warnings: default_security_warnings,
-                    message: "Cached result (no new assessment needed)".to_string(),
-                    explanation: recent_scan
-                        .explanation
-                        .unwrap_or_else(|| "No explanation".to_string()),
+                    whois_info: None,
+                    security_warnings,              // Move happens here
+                    message,                        // Use pre-calculated message
+                    explanation: final_explanation, // Use cached explanation
                     tls_scan_duration: recent_scan
                         .tls_scan_duration
                         .unwrap_or_else(|| "< 0.01s".to_string()),
@@ -724,7 +737,8 @@ fn process_certificate(
 /// Calculate days until certificate expiry
 fn calculate_days_until_expiry(cert_info: &mut CertificateInfo) {
     if let Some(valid_to) = &cert_info.valid_to {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ") {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%S%F{UTC}")
+        {
             let now = chrono::Utc::now().naive_utc();
             let days = (dt - now).num_days();
             cert_info.days_until_expiry = Some(days);
@@ -799,6 +813,8 @@ async fn store_scan_result(
     data: &AssessmentData,
     explanation: &Option<String>,
     scan_duration_str: &str,
+    // NEW: Add phishing analysis parameter
+    phishing_analysis: &crate::services::phishing_detector::PhishingAnalysis,
 ) {
     println!("Inserting new scan record into database for {}", domain);
 
@@ -808,6 +824,22 @@ async fn store_scan_result(
     let vulnerabilities_json = serde_json::to_string(&data.vulnerabilities).unwrap();
     let key_exchange_json = serde_json::to_string(&data.key_exchange).unwrap();
     let details_json = "{}";
+
+    // Extract phishing data
+    let is_phishing_detected = if phishing_analysis.is_suspicious {
+        Some(true)
+    } else {
+        Some(false)
+    };
+    let phishing_risk_score = Some(phishing_analysis.risk_score as i32);
+    let phishing_warning_message = if phishing_analysis.is_suspicious {
+        Some(format!(
+            "PHISHING RISK DETECTED ({}% confidence). This site shows suspicious patterns commonly used by fraudulent websites.",
+            phishing_analysis.risk_score
+        ))
+    } else {
+        None
+    };
 
     match crate::db::insert_scan(
         &state.pool,
@@ -822,6 +854,9 @@ async fn store_scan_result(
         explanation.as_deref(),
         Some(scan_duration_str),
         details_json,
+        is_phishing_detected,
+        phishing_risk_score,
+        phishing_warning_message.as_deref(),
     )
     .await
     {
