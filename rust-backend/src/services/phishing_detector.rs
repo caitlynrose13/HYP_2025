@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +18,11 @@ pub enum PhishingRecommendation {
     HighRisk, // 61-80
     Block,    // 81-100
 }
+
+// Add a small-risk list of TLDs that are frequently abused (low weight)
+const SUSPICIOUS_TLDS: &[&str] = &[
+    "shop", "xyz", "top", "work", "gq", "tk", "ml", "cf", "ga", "pw", "click", "monster",
+];
 
 // Simple whitelist of major sites that should never be flagged
 const SAFE_DOMAINS: &[&str] = &[
@@ -60,10 +66,33 @@ pub fn analyze_for_phishing(domain: &str, page_content: Option<&str>) -> Phishin
     let mut risk_score = 0u32;
     let mut warnings = Vec::new();
 
-    // STEP 2: Simple domain checks
+    // STEP 2: Domain-level checks
     let domain_lower = domain.to_lowercase();
 
-    // Check for obviously suspicious domain patterns
+    // Suspicious TLD (small weight)
+    if let Some(tld) = domain_lower.rsplit('.').next() {
+        if SUSPICIOUS_TLDS.contains(&tld) {
+            risk_score += 10;
+            warnings.push(format!("Suspicious TLD .{}", tld));
+        }
+    }
+
+    // Very long domains (likely suspicious)
+    if domain_lower.len() > 60 {
+        risk_score += 20;
+        warnings.push("Unusually long domain".to_string());
+    } else if domain_lower.len() > 35 {
+        risk_score += 10;
+        warnings.push("Long domain".to_string());
+    }
+
+    // Heavy tracking URL (keep if full URL is provided)
+    if domain_lower.contains('?') && domain_lower.matches('&').count() >= 3 {
+        risk_score += 10;
+        warnings.push("Tracker-style query parameters".to_string());
+    }
+
+    // Known suspicious keywords in domain
     if domain_lower.contains("secure-update")
         || domain_lower.contains("account-verify")
         || domain_lower.contains("login-check")
@@ -74,18 +103,12 @@ pub fn analyze_for_phishing(domain: &str, page_content: Option<&str>) -> Phishin
         warnings.push("Suspicious domain keywords".to_string());
     }
 
-    // Check for very long domains (likely suspicious)
-    if domain.len() > 60 {
-        risk_score += 20;
-        warnings.push("Unusually long domain".to_string());
-    }
-
-    // STEP 3: Simple content checks (if content provided)
+    // STEP 3: Page content checks (if content provided)
     if let Some(content) = page_content {
         let content_lower = content.to_lowercase();
 
-        // Check for high-confidence phishing phrases
-        let phishing_phrases = [
+        // Strong scam / urgency phrases
+        let strong_phrases = [
             "you have won",
             "congratulations winner",
             "claim your prize",
@@ -93,25 +116,45 @@ pub fn analyze_for_phishing(domain: &str, page_content: Option<&str>) -> Phishin
             "account suspended",
             "verify immediately",
             "expires today",
-            "click here now",
             "limited time offer",
             "act now or lose",
+            "reward",
+            "gift card",
+            "prize",
+            "start survey",
+            "survey",
+            "attention!",
+            "offer expires",
         ];
-
-        let phrase_matches = phishing_phrases
+        let strong_hits = strong_phrases
             .iter()
-            .filter(|&phrase| content_lower.contains(phrase))
+            .filter(|p| content_lower.contains(*p))
             .count();
 
-        if phrase_matches >= 3 {
+        if strong_hits >= 3 {
             risk_score += 50;
-            warnings.push("Multiple phishing phrases detected".to_string());
-        } else if phrase_matches >= 1 {
-            risk_score += 20;
-            warnings.push("Suspicious language detected".to_string());
+            warnings.push("Multiple strong scam phrases detected".to_string());
+        } else if strong_hits >= 1 {
+            risk_score += 25;
+            warnings.push("Scam phrase detected".to_string());
         }
 
-        // Check for excessive excitement (lots of exclamation marks)
+        // Countdown / timer hints
+        let has_countdown = content_lower.contains("expires in") ||
+            content_lower.contains("offer expires in") ||
+            content_lower.contains("expires today") ||
+            content_lower.contains("countdown") ||
+            // simple mm:ss pattern
+            Regex::new(r"\b\d{1,2}:\d{2}\b").ok()
+                .map(|re| re.is_match(&content_lower))
+                .unwrap_or(false);
+
+        if has_countdown {
+            risk_score += 10;
+            warnings.push("Countdown/timer urgency".to_string());
+        }
+
+        // Excessive excitement
         let exclamation_count = content.matches('!').count();
         if exclamation_count > 20 {
             risk_score += 15;
@@ -119,7 +162,7 @@ pub fn analyze_for_phishing(domain: &str, page_content: Option<&str>) -> Phishin
         }
     }
 
-    // STEP 4: Cap at 100 and determine recommendation
+    // STEP 4: Cap and classify
     risk_score = std::cmp::min(risk_score, 100);
 
     let recommendation = match risk_score {

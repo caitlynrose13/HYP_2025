@@ -1,8 +1,9 @@
 use crate::AppState;
-use crate::services::certificate_parser::{calculate_days_until_expiry, parse_certificate}; // Add this function import
+use crate::services::certificate_parser::{calculate_days_until_expiry, parse_certificate};
 use crate::services::http_security_checker::check_http_security;
 use crate::services::openssl_probe::{test_tls10, test_tls11};
-use crate::services::security_grader::{Grade, GradeInput};
+use crate::services::security_grader::Grade;
+use crate::services::security_grader::GradeInput;
 use crate::services::tls_parser::TlsVersion;
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
@@ -143,7 +144,7 @@ impl AssessmentData {
 // ====================================
 // MAIN ASSESSMENT HANDLER
 
-/// Main entry point for TLS domain assessment
+/// Main entry point for TLS domain assessment - NOW WITH ALL SERVICES
 pub async fn assess_domain(
     State(state): State<AppState>,
     Json(payload): Json<AssessmentRequest>,
@@ -156,7 +157,7 @@ pub async fn assess_domain(
         return cached_response;
     }
 
-    println!("=== STARTING NEW TLS ASSESSMENT ===");
+    println!("=== STARTING COMPREHENSIVE ASSESSMENT (ALL SERVICES) ===");
     println!("Domain: {}", domain);
     println!(
         "Timestamp: {}",
@@ -169,92 +170,80 @@ pub async fn assess_domain(
     // Perform security checks
     assessment_data.grade_input.hsts = check_hsts_support(domain).await;
 
-    // NEW: Check HTTP security headers
+    // Check HTTP security headers
     if let Ok(http_security) = check_http_security(domain).await {
         assessment_data.grade_input.https_redirect = http_security.https_redirect;
         assessment_data.grade_input.csp_header = http_security.csp_header;
         assessment_data.grade_input.x_frame_options = http_security.x_frame_options;
         assessment_data.grade_input.x_content_type_options = http_security.x_content_type_options;
         assessment_data.grade_input.expect_ct = http_security.expect_ct;
-
-        println!("HTTP Security Check Results:");
-        println!("  HTTPS Redirect: {}", http_security.https_redirect);
-        println!("  CSP Header: {}", http_security.csp_header);
-        println!("  X-Frame-Options: {}", http_security.x_frame_options);
-        println!(
-            "  X-Content-Type-Options: {}",
-            http_security.x_content_type_options
-        );
-        println!("  Expect-CT: {}", http_security.expect_ct);
-    } else {
-        println!("HTTP security check failed, using defaults (false)");
     }
 
-    assess_tls_protocols(domain, &mut assessment_data).await;
+    // Start TLS assessment
+    let tls_future = async {
+        assess_tls_protocols(domain, &mut assessment_data).await;
+        assessment_data
+    };
 
-    // ADD THIS DEBUG SECTION HERE
-    println!("=== GRADE INPUT DEBUG ===");
-    println!("TLS Protocol Support:");
-    println!(
-        "  tls13_supported: {}",
-        assessment_data.grade_input.tls13_supported
-    );
-    println!(
-        "  tls12_supported: {}",
-        assessment_data.grade_input.tls12_supported
-    );
-    println!(
-        "  tls11_supported: {}",
-        assessment_data.grade_input.tls11_supported
-    );
-    println!(
-        "  tls10_supported: {}",
-        assessment_data.grade_input.tls10_supported
-    );
-    println!("Certificate Status:");
-    println!("  cert_valid: {}", assessment_data.grade_input.cert_valid);
-    println!(
-        "  cert_expired: {}",
-        assessment_data.grade_input.cert_expired
-    );
-    println!(
-        "  cert_key_strength_ok: {}",
-        assessment_data.grade_input.cert_key_strength_ok
-    );
-    println!("Security Features:");
-    println!("  hsts: {}", assessment_data.grade_input.hsts);
-    println!(
-        "  forward_secrecy: {}",
-        assessment_data.grade_input.forward_secrecy
-    );
-    println!(
-        "  weak_protocols_disabled: {}",
-        assessment_data.grade_input.weak_protocols_disabled
-    );
-    println!(
-        "  ocsp_stapling_enabled: {}",
-        assessment_data.grade_input.ocsp_stapling_enabled
-    );
-    println!("HTTP Security Headers:");
-    println!(
-        "  https_redirect: {}",
-        assessment_data.grade_input.https_redirect
-    );
-    println!("  csp_header: {}", assessment_data.grade_input.csp_header);
-    println!(
-        "  x_frame_options: {}",
-        assessment_data.grade_input.x_frame_options
-    );
-    println!(
-        "  x_content_type_options: {}",
-        assessment_data.grade_input.x_content_type_options
-    );
-    println!("  expect_ct: {}", assessment_data.grade_input.expect_ct);
-    println!("=== END GRADE INPUT DEBUG ===");
+    // Start SSL Labs assessment (in parallel)
+    let ssl_labs_future = async {
+        println!("🔍 Starting SSL Labs scan for {}", domain);
+        match crate::services::ssllabs::fetch_ssllabs_results(domain).await {
+            Ok(result) => {
+                let secs = (result.scan_duration as f64) / 1000.0;
+                println!("✅ SSL Labs completed: {} ({:.2}s)", result.grade, secs);
+                (Some(result.grade), None::<String>, Some(secs)) // grade: Option<String>, err: Option<String>, time: Option<f64>
+            }
+            Err(e) => {
+                println!("❌ SSL Labs failed: {}", e);
+                (None, Some(e), None)
+            }
+        }
+    };
 
-    // Calculate final grade and explanation
+    // Start Mozilla Observatory assessment (in parallel)
+    let mozilla_future = async {
+        println!("🔍 Starting Mozilla Observatory scan for {}", domain);
+        match crate::services::mozilla_observatory::fetch_observatory_results(domain).await {
+            Ok(result) => {
+                // result.scan_duration like "1.23s" -> parse to f64 seconds
+                let secs = result
+                    .scan_duration
+                    .as_deref()
+                    .and_then(|s| s.trim_end_matches('s').parse::<f64>().ok());
+                let grade_label = result.grade.clone().unwrap_or_else(|| "-".to_string());
+                println!(
+                    "✅ Mozilla Observatory completed: {} ({})",
+                    grade_label,
+                    result.scan_duration.as_deref().unwrap_or("-")
+                );
+                (result.grade, None::<String>, secs) // grade: Option<String>, err: Option<String>, time: Option<f64>
+            }
+            Err(e) => {
+                println!("❌ Mozilla Observatory failed: {}", e);
+                (None, Some(e), None)
+            }
+        }
+    };
+
+    // Run ALL THREE services in parallel
+    let (
+        assessment_data,
+        (ssl_grade, ssl_error, ssl_time),
+        (mozilla_grade, mozilla_error, mozilla_time),
+    ) = tokio::join!(tls_future, ssl_labs_future, mozilla_future);
+
+    println!("=== ALL SERVICES COMPLETED ===");
+    println!("TLS Analysis: Complete");
+    println!(
+        "SSL Labs: {} | Mozilla Observatory: {}",
+        ssl_grade.as_deref().unwrap_or("Failed"),
+        mozilla_grade.as_deref().unwrap_or("Failed")
+    );
+
+    // Calculate final grade
     let whois_resp = crate::services::security_grader::whois_query(domain).ok();
-    let (grade, explanation) = crate::services::security_grader::get_or_run_scan(
+    let (tls_grade, explanation) = crate::services::security_grader::get_or_run_scan(
         domain,
         &assessment_data.grade_input,
         &assessment_data.certificate_info,
@@ -264,47 +253,27 @@ pub async fn assess_domain(
         &assessment_data.key_exchange,
         whois_resp.as_deref(),
     );
-    println!("=== GRADING DEBUG ===");
-    println!("Initial Grade (before phishing): {:?}", grade);
-    println!("Initial Explanation: {:?}", explanation);
-    println!("=== END GRADING DEBUG ===");
 
-    // Process WHOIS information for display
-    let whois_info = if let Some(ref whois_resp_str) = whois_resp {
-        Some(extract_whois_info_for_display(whois_resp_str))
-    } else {
-        None
-    };
-
-    // NEW: Perform phishing analysis
+    // Perform phishing analysis
     let phishing_analysis = perform_phishing_analysis(domain).await;
 
-    // Apply phishing grade override with better logic
-    let (final_grade, mut final_explanation) = if phishing_analysis.is_suspicious {
+    // Apply phishing grade override
+    let (final_grade, final_explanation) = if phishing_analysis.is_suspicious {
         let risk_score = phishing_analysis.risk_score;
-
         match risk_score {
-            90..=100 => {
-                // Very high risk - definitely override to F
-                (
-                    Grade::F,
-                    "CRITICAL PHISHING RISK: This site is highly likely to be fraudulent."
-                        .to_string(),
-                )
-            }
-            80..=89 => {
-                // High risk - override to F but note TLS quality
-                (
-                    Grade::F,
-                    format!(
-                        "HIGH PHISHING RISK ({}%): Site appears fraudulent despite good TLS security.",
-                        risk_score
-                    ),
-                )
-            }
+            90..=100 => (
+                Grade::F,
+                "CRITICAL PHISHING RISK: This site is highly likely to be fraudulent.".to_string(),
+            ),
+            80..=89 => (
+                Grade::F,
+                format!(
+                    "HIGH PHISHING RISK ({}%): Site appears fraudulent despite good TLS security.",
+                    risk_score
+                ),
+            ),
             70..=79 => {
-                // Moderate-high risk - downgrade significantly but not to F if TLS is excellent
-                if matches!(grade, Grade::APlus | Grade::A) {
+                if matches!(tls_grade, Grade::APlus | Grade::A) {
                     (
                         Grade::C,
                         format!(
@@ -323,12 +292,11 @@ pub async fn assess_domain(
                 }
             }
             60..=69 => {
-                // Moderate risk - minor downgrade only
-                let downgraded_grade = match grade {
+                let downgraded_grade = match tls_grade {
                     Grade::APlus => Grade::A,
                     Grade::A => Grade::B,
                     Grade::B => Grade::C,
-                    other => other, // Don't improve grades
+                    other => other,
                 };
                 (
                     downgraded_grade,
@@ -338,41 +306,29 @@ pub async fn assess_domain(
                     ),
                 )
             }
-            _ => {
-                // Low risk - just warn, don't change grade
-                (
-                    grade,
-                    format!(
-                        "LOW PHISHING RISK ({}%): Minor suspicious patterns detected.",
-                        risk_score
-                    ),
-                )
-            }
+            _ => (
+                tls_grade,
+                format!(
+                    "LOW PHISHING RISK ({}%): Minor suspicious patterns detected.",
+                    risk_score
+                ),
+            ),
         }
     } else {
         (
-            grade,
+            tls_grade,
             explanation
                 .clone()
                 .unwrap_or_else(|| "No issues found".to_string()),
         )
     };
 
-    println!("=== PHISHING IMPACT DEBUG ===");
-    println!("Pre-phishing grade: {:?}", grade);
-    println!("Phishing risk score: {}", phishing_analysis.risk_score);
-    println!("Phishing suspicious: {}", phishing_analysis.is_suspicious);
-    println!("Final grade after phishing analysis: {:?}", final_grade);
-    println!("=== END PHISHING IMPACT DEBUG ===");
-
-    // Combine explanations if we have both technical and phishing issues
-    if phishing_analysis.is_suspicious && explanation.is_some() {
-        final_explanation = format!(
-            "{} PHISHING WARNING: {}",
-            explanation.unwrap_or_default(),
-            phishing_analysis.content_warnings.join(" ")
-        );
-    }
+    // Process WHOIS information for display
+    let whois_info = if let Some(ref whois_resp_str) = whois_resp {
+        Some(extract_whois_info_for_display(whois_resp_str))
+    } else {
+        None
+    };
 
     // Generate security warnings for frontend
     let security_warnings = generate_security_warnings(&phishing_analysis);
@@ -381,21 +337,33 @@ pub async fn assess_domain(
     let scan_duration = scan_start.elapsed();
     let scan_duration_str = format!("{:.2}s", scan_duration.as_secs_f64());
 
-    // Store scan results in database
-    store_scan_result(
+    // Store ALL results in database (including individual service grades)
+    // Normalize nested Options to borrowed forms
+    let ssl_grade_ref: Option<&str> = ssl_grade.as_deref();
+    let mozilla_grade_ref: Option<&str> = mozilla_grade.as_deref();
+    let ssl_err_ref: Option<&str> = ssl_error.as_deref();
+    let moz_err_ref: Option<&str> = mozilla_error.as_deref();
+
+    store_comprehensive_scan_result(
         &state,
         domain,
         &final_grade,
         &assessment_data,
         &Some(final_explanation.clone()),
         &scan_duration_str,
-        &phishing_analysis, // Pass phishing analysis
+        &phishing_analysis,
+        ssl_grade_ref,
+        mozilla_grade_ref,
+        ssl_time,     // already Option<f64>
+        mozilla_time, // already Option<f64>
+        ssl_err_ref,
+        moz_err_ref,
     )
     .await;
 
     println!("=== Assessment Complete ===");
 
-    // Determine message before moving security_warnings
+    // Determine message
     let message = if security_warnings.is_phishing_suspicious {
         "Security analysis completed - PHISHING DETECTED".to_string()
     } else {
@@ -414,8 +382,8 @@ pub async fn assess_domain(
             vulnerabilities: assessment_data.vulnerabilities,
             key_exchange: assessment_data.key_exchange,
             whois_info,
-            security_warnings, // Move happens here
-            message,           // Use pre-calculated message
+            security_warnings,
+            message,
             tls_scan_duration: scan_duration_str,
         }),
     )
@@ -452,7 +420,6 @@ async fn check_cached_scan(
 
             let grade = parse_grade_from_string(&recent_scan.grade);
 
-            // NEW: Use cached phishing data instead of re-running analysis
             let security_warnings = SecurityWarnings {
                 is_phishing_suspicious: recent_scan.is_phishing_detected.unwrap_or(false),
                 phishing_risk_score: recent_scan.phishing_risk_score.unwrap_or(0) as u32,
@@ -1085,4 +1052,241 @@ fn extract_registrar_local(response: &str) -> Option<String> {
         }
     }
     None
+}
+
+// Remove or comment out the comprehensive assessment function for now
+// since the required services don't exist yet
+
+// ====================================
+// COMPREHENSIVE SCAN STORAGE
+
+/// Store comprehensive scan results in database (including individual service grades)
+async fn store_comprehensive_scan_result(
+    state: &AppState,
+    domain: &str,
+    grade: &Grade,
+    data: &AssessmentData,
+    explanation: &Option<String>,
+    scan_duration_str: &str,
+    phishing_analysis: &crate::services::phishing_detector::PhishingAnalysis,
+    ssl_labs_grade: Option<&str>,
+    mozilla_grade: Option<&str>,
+    ssl_time: Option<f64>,
+    mozilla_time: Option<f64>,
+    ssl_error: Option<&str>,
+    mozilla_error: Option<&str>,
+) {
+    println!("Storing comprehensive scan result for {}", domain);
+
+    let certificate_json = serde_json::to_string(&data.certificate_info).unwrap();
+    let protocols_json = serde_json::to_string(&data.protocols).unwrap();
+    let cipher_suites_json = serde_json::to_string(&data.cipher_suites).unwrap();
+    let vulnerabilities_json = serde_json::to_string(&data.vulnerabilities).unwrap();
+    let key_exchange_json = serde_json::to_string(&data.key_exchange).unwrap();
+    let details_json = "{}";
+
+    let is_phishing_detected = Some(phishing_analysis.is_suspicious);
+    let phishing_risk_score = Some(phishing_analysis.risk_score as i32);
+    let phishing_warning_message = if phishing_analysis.is_suspicious {
+        Some(format!(
+            "PHISHING RISK DETECTED ({}% confidence). This site shows suspicious patterns.",
+            phishing_analysis.risk_score
+        ))
+    } else {
+        None
+    };
+
+    match crate::db::insert_scan(
+        &state.pool,
+        domain,
+        "anonymous",
+        &format!("{:?}", grade),
+        ssl_labs_grade,
+        mozilla_grade,
+        Some(&format!("{:?}", grade)),
+        ssl_time,
+        mozilla_time,
+        Some(scan_duration_str.parse::<f64>().unwrap_or(0.0)),
+        ssl_error,
+        mozilla_error,
+        None,
+        &certificate_json,
+        &protocols_json,
+        &cipher_suites_json,
+        &vulnerabilities_json,
+        &key_exchange_json,
+        explanation.as_deref(),
+        Some(scan_duration_str),
+        details_json,
+        is_phishing_detected,
+        phishing_risk_score,
+        phishing_warning_message.as_deref(),
+    )
+    .await
+    {
+        Ok(_) => println!("Comprehensive database insert successful for {}", domain),
+        Err(e) => println!("Database insert failed for {}: {:?}", domain, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::certificate_parser::ParsedCertificate;
+
+    #[test]
+    fn test_parse_grade_from_string() {
+        assert_eq!(parse_grade_from_string("APlus"), Grade::APlus);
+        assert_eq!(parse_grade_from_string("A"), Grade::A);
+        assert_eq!(parse_grade_from_string("B"), Grade::B);
+        assert_eq!(parse_grade_from_string("C"), Grade::C);
+        assert_eq!(parse_grade_from_string("F"), Grade::F);
+        assert_eq!(parse_grade_from_string("Invalid"), Grade::F);
+    }
+
+    #[test]
+    fn test_assessment_data_new() {
+        let data = AssessmentData::new();
+        assert_eq!(data.protocols.tls_1_2, "Not Supported");
+        assert_eq!(data.protocols.tls_1_3, "Not Supported");
+        assert!(!data.grade_input.tls13_supported);
+        assert!(!data.grade_input.cert_valid);
+    }
+
+    #[test]
+    fn test_generate_security_warnings_low_risk() {
+        let analysis = crate::services::phishing_detector::PhishingAnalysis {
+            is_suspicious: false,
+            risk_score: 30,
+            detected_patterns: vec![],
+            content_warnings: vec![],
+            domain_warnings: vec![],
+            recommendation: crate::services::phishing_detector::PhishingRecommendation::Safe,
+        };
+
+        let warnings = generate_security_warnings(&analysis);
+        assert!(!warnings.is_phishing_suspicious);
+        assert_eq!(warnings.phishing_risk_score, 30);
+        assert!(warnings.warning_message.is_none());
+    }
+
+    #[test]
+    fn test_generate_security_warnings_high_risk() {
+        let analysis = crate::services::phishing_detector::PhishingAnalysis {
+            is_suspicious: true,
+            risk_score: 85,
+            detected_patterns: vec!["Suspicious domain".to_string()],
+            content_warnings: vec![],
+            domain_warnings: vec![],
+            recommendation: crate::services::phishing_detector::PhishingRecommendation::HighRisk,
+        };
+
+        let warnings = generate_security_warnings(&analysis);
+        assert!(warnings.is_phishing_suspicious);
+        assert_eq!(warnings.phishing_risk_score, 85);
+        assert!(warnings.warning_message.is_some());
+        assert!(
+            warnings
+                .warning_message
+                .unwrap()
+                .contains("PHISHING RISK DETECTED")
+        );
+    }
+
+    #[test]
+    fn test_extract_whois_info_for_display() {
+        let whois_response = "Creation Date: 2020-01-15T10:30:00Z\nRegistrar: Test Registrar";
+        let info = extract_whois_info_for_display(whois_response);
+
+        assert!(info.creation_date.is_some());
+        assert!(info.domain_age_days.is_some());
+        assert_eq!(info.registrar, Some("Test Registrar".to_string()));
+        assert_eq!(info.status, "Established Domain");
+    }
+
+    #[test]
+    fn test_validate_key_strength() {
+        let cert_weak = ParsedCertificate {
+            subject: "test".to_string(),
+            issuer: "test".to_string(),
+            not_before: "2023-01-01".to_string(),
+            not_after: "2024-01-01".to_string(),
+            key_size: Some("64".to_string()),
+            signature_algorithm: "SHA256".to_string(),
+            serial_number: "123".to_string(),
+            subject_alt_names: vec![],
+            expired: false,
+            days_until_expiry: Some(-365), // Add missing field
+        };
+
+        let cert_strong = ParsedCertificate {
+            subject: "test".to_string(),
+            issuer: "test".to_string(),
+            not_before: "2023-01-01".to_string(),
+            not_after: "2024-01-01".to_string(),
+            key_size: Some("2048".to_string()),
+            signature_algorithm: "SHA256".to_string(),
+            serial_number: "123".to_string(),
+            subject_alt_names: vec![],
+            expired: false,
+            days_until_expiry: Some(365), // Add missing field
+        };
+
+        assert!(!validate_key_strength(&cert_weak));
+        assert!(validate_key_strength(&cert_strong));
+    }
+
+    #[tokio::test]
+    async fn test_assessment_request_serialization() {
+        let request = AssessmentRequest {
+            domain: "example.com".to_string(),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("example.com"));
+
+        let deserialized: AssessmentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, "example.com");
+    }
+
+    #[test]
+    fn test_certificate_info_default() {
+        let cert_info = CertificateInfo::default();
+        assert!(cert_info.common_name.is_none());
+        assert!(cert_info.issuer.is_none());
+        assert!(cert_info.days_until_expiry.is_none());
+        assert!(cert_info.subject_alt_names.is_empty());
+    }
+
+    #[test]
+    fn test_vulnerability_info_assessment() {
+        let mut data = AssessmentData::new();
+        data.protocols.tls_1_0 = "Supported".to_string();
+        data.cipher_suites
+            .tls_1_2_suites
+            .push("TLS_RSA_WITH_RC4_128_SHA".to_string());
+
+        assess_vulnerabilities(&mut data);
+
+        assert_eq!(data.vulnerabilities.poodle, "Potentially Vulnerable");
+        assert_eq!(data.vulnerabilities.beast, "Potentially Vulnerable");
+        assert_eq!(data.vulnerabilities.heartbleed, "Unknown");
+    }
+
+    #[test]
+    fn test_protocol_support_default() {
+        let protocols = ProtocolSupport::default();
+        assert_eq!(protocols.tls_1_0, "");
+        assert_eq!(protocols.tls_1_1, "");
+        assert_eq!(protocols.tls_1_2, "");
+        assert_eq!(protocols.tls_1_3, "");
+    }
+
+    #[test]
+    fn test_key_exchange_info_default() {
+        let key_exchange = KeyExchangeInfo::default();
+        assert!(!key_exchange.supports_forward_secrecy);
+        assert!(key_exchange.key_exchange_algorithm.is_none());
+        assert!(key_exchange.curve_name.is_none());
+    }
 }
