@@ -141,7 +141,7 @@ pub async fn assess_domain(
     State(state): State<AppState>,
     Json(payload): Json<AssessmentRequest>,
 ) -> (StatusCode, Json<AssessmentResponse>) {
-    let scan_start = std::time::Instant::now();
+    let user_experience_start = std::time::Instant::now(); // Track total time from user perspective
     let domain = payload.domain.trim();
 
     // Check for cached results first
@@ -226,8 +226,15 @@ pub async fn assess_domain(
         (mozilla_grade, mozilla_error, mozilla_time),
     ) = tokio::join!(tls_future, ssl_labs_future, mozilla_future);
 
+    // Calculate the ACTUAL user experience time (total time from start to finish)
+    let total_user_experience_time = user_experience_start.elapsed().as_secs_f64();
+
     println!("=== ALL SERVICES COMPLETED ===");
     println!("TLS Analysis: Complete ({:.2}s)", tls_scan_time);
+    println!(
+        "Total User Experience Time: {:.2}s",
+        total_user_experience_time
+    );
     println!(
         "SSL Labs: {} | Mozilla Observatory: {}",
         ssl_grade.as_deref().unwrap_or("Failed"),
@@ -254,11 +261,7 @@ pub async fn assess_domain(
         None
     };
 
-    // Calculate scan duration
-    let scan_duration = scan_start.elapsed();
-    let scan_duration_str = format!("{:.2}s", scan_duration.as_secs_f64());
-
-    // Store results in database with correct TLS timing
+    // Store results in database with both individual and total times
     let ssl_grade_ref: Option<&str> = ssl_grade.as_deref();
     let mozilla_grade_ref: Option<&str> = mozilla_grade.as_deref();
     let ssl_err_ref: Option<&str> = ssl_error.as_deref();
@@ -268,7 +271,8 @@ pub async fn assess_domain(
         &state,
         domain,
         &final_grade,
-        tls_scan_time, // Pass the actual TLS scan time
+        tls_scan_time,
+        total_user_experience_time, // Pass the total user experience time
         ssl_grade_ref,
         mozilla_grade_ref,
         ssl_time,
@@ -293,7 +297,7 @@ pub async fn assess_domain(
             key_exchange: assessment_data.key_exchange,
             whois_info,
             message: "Security analysis completed".to_string(),
-            tls_scan_duration: format!("{:.2}s", tls_scan_time),
+            tls_scan_duration: format!("{:.2}s", total_user_experience_time), // Show user experience time
         }),
     )
 }
@@ -314,9 +318,10 @@ async fn check_cached_scan(
 
             let grade = parse_grade_from_string(&recent_scan.grade);
 
-            // Format the TLS scan duration properly for display
-            let tls_duration = recent_scan
-                .tls_scan_time
+            // Use total_scan_time for user experience, fallback to tls_scan_time if needed
+            let display_duration = recent_scan
+                .total_scan_time
+                .or(recent_scan.tls_scan_time)
                 .map(|time| format!("{:.2}s", time))
                 .unwrap_or_else(|| "< 0.01s".to_string());
 
@@ -333,7 +338,7 @@ async fn check_cached_scan(
                     whois_info: None,
                     message: "Security analysis completed".to_string(),
                     explanation: "Cached scan result".to_string(),
-                    tls_scan_duration: tls_duration,
+                    tls_scan_duration: display_duration, // Show the actual user experience time
                 }),
             ))
         }
@@ -670,7 +675,8 @@ async fn store_comprehensive_scan_result(
     state: &AppState,
     domain: &str,
     grade: &Grade,
-    tls_scan_time: f64, // Change this to accept the actual TLS time
+    tls_scan_time: f64,
+    total_scan_time: f64, // NEW: User experience time
     ssl_labs_grade: Option<&str>,
     mozilla_grade: Option<&str>,
     ssl_time: Option<f64>,
@@ -679,6 +685,8 @@ async fn store_comprehensive_scan_result(
     mozilla_error: Option<&str>,
 ) {
     println!("Storing comprehensive scan result for {}", domain);
+    println!("  - TLS scan time: {:.2}s", tls_scan_time);
+    println!("  - Total user experience time: {:.2}s", total_scan_time);
 
     match crate::db::insert_scan(
         &state.pool,
@@ -688,7 +696,8 @@ async fn store_comprehensive_scan_result(
         mozilla_grade,
         ssl_time,
         mozilla_time,
-        Some(tls_scan_time), // Use the actual TLS scan time
+        Some(tls_scan_time),
+        Some(total_scan_time), // Store the total user experience time
         ssl_error,
         mozilla_error,
         None, // tls_error

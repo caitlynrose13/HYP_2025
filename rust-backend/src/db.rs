@@ -14,6 +14,7 @@ pub struct ScanRecord {
     pub ssl_labs_scan_time: Option<f64>,
     pub mozilla_scan_time: Option<f64>,
     pub tls_scan_time: Option<f64>,
+    pub total_scan_time: Option<f64>, // NEW: User experience time
     pub ssl_labs_error: Option<String>,
     pub mozilla_error: Option<String>,
     pub tls_error: Option<String>,
@@ -35,7 +36,7 @@ pub struct SecurityTimelineEntry {
 // DATABASE INITIALIZATION
 
 pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    // Create the main scan_records table (SIMPLIFIED)
+    // Create the main scan_records table with total_scan_time
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS scan_records (
@@ -47,6 +48,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             ssl_labs_scan_time REAL,
             mozilla_scan_time REAL,
             tls_scan_time REAL,
+            total_scan_time REAL,
             ssl_labs_error TEXT,
             mozilla_error TEXT,
             tls_error TEXT,
@@ -125,6 +127,7 @@ pub async fn insert_scan(
     ssl_labs_scan_time: Option<f64>,
     mozilla_scan_time: Option<f64>,
     tls_scan_time: Option<f64>,
+    total_scan_time: Option<f64>, // NEW: Total user experience time
     ssl_labs_error: Option<&str>,
     mozilla_error: Option<&str>,
     tls_error: Option<&str>,
@@ -135,9 +138,9 @@ pub async fn insert_scan(
         INSERT INTO scan_records (
             domain, grade, scan_time,
             ssl_labs_grade, mozilla_observatory_grade,
-            ssl_labs_scan_time, mozilla_scan_time, tls_scan_time,
+            ssl_labs_scan_time, mozilla_scan_time, tls_scan_time, total_scan_time,
             ssl_labs_error, mozilla_error, tls_error
-        ) VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(domain)
@@ -147,6 +150,7 @@ pub async fn insert_scan(
     .bind(ssl_labs_scan_time)
     .bind(mozilla_scan_time)
     .bind(tls_scan_time)
+    .bind(total_scan_time)
     .bind(ssl_labs_error)
     .bind(mozilla_error)
     .bind(tls_error)
@@ -318,6 +322,7 @@ pub async fn handle_scan_request(
     ssl_labs_scan_time: Option<f64>,
     mozilla_scan_time: Option<f64>,
     tls_scan_time: Option<f64>,
+    total_scan_time: Option<f64>, // NEW
     ssl_labs_error: Option<String>,
     mozilla_error: Option<String>,
     tls_error: Option<String>,
@@ -331,6 +336,7 @@ pub async fn handle_scan_request(
         ssl_labs_scan_time,
         mozilla_scan_time,
         tls_scan_time,
+        total_scan_time,
         ssl_labs_error.as_deref(),
         mozilla_error.as_deref(),
         tls_error.as_deref(),
