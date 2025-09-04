@@ -14,7 +14,7 @@ pub struct ScanRecord {
     pub ssl_labs_scan_time: Option<f64>,
     pub mozilla_scan_time: Option<f64>,
     pub tls_scan_time: Option<f64>,
-    pub total_scan_time: Option<f64>, // NEW: User experience time
+    pub total_scan_time: Option<f64>,
     pub ssl_labs_error: Option<String>,
     pub mozilla_error: Option<String>,
     pub tls_error: Option<String>,
@@ -127,7 +127,7 @@ pub async fn insert_scan(
     ssl_labs_scan_time: Option<f64>,
     mozilla_scan_time: Option<f64>,
     tls_scan_time: Option<f64>,
-    total_scan_time: Option<f64>, // NEW: Total user experience time
+    total_scan_time: Option<f64>,
     ssl_labs_error: Option<&str>,
     mozilla_error: Option<&str>,
     tls_error: Option<&str>,
@@ -322,7 +322,7 @@ pub async fn handle_scan_request(
     ssl_labs_scan_time: Option<f64>,
     mozilla_scan_time: Option<f64>,
     tls_scan_time: Option<f64>,
-    total_scan_time: Option<f64>, // NEW
+    total_scan_time: Option<f64>,
     ssl_labs_error: Option<String>,
     mozilla_error: Option<String>,
     tls_error: Option<String>,

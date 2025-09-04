@@ -6,7 +6,7 @@ use x509_parser::{
     time::ASN1Time,
 };
 
-// ==========
+// ====================================
 // DATA STRUCTURES
 
 #[derive(Debug, Serialize)]
@@ -23,15 +23,14 @@ pub struct ParsedCertificate {
     pub subject_alt_names: Vec<String>,
 }
 
-// ====================
+// ====================================
 // MAIN PARSING FUNCTION
 
-//get the certificate information like subject, issuer, validity period, key size
+/// Parses X.509 certificate DER data and extracts security-relevant information
 pub fn parse_certificate(der: &[u8]) -> Result<ParsedCertificate, String> {
     let (_, cert) = X509Certificate::from_der(der)
         .map_err(|e| format!("Failed to parse certificate: {}", e))?;
 
-    // Extract certificate fields
     let subject = extract_common_name(cert.subject());
     let issuer = extract_common_name(cert.issuer());
     let (not_before, not_after, expired) = extract_validity(&cert);
@@ -53,10 +52,10 @@ pub fn parse_certificate(der: &[u8]) -> Result<ParsedCertificate, String> {
     })
 }
 
-// =========================
-// HELPER FUNCTIONS
+// ====================================
+// CERTIFICATE FIELD EXTRACTION
 
-/// Extract common name from X509Name
+/// Extract common name from X509Name structure
 fn extract_common_name(name: &x509_parser::x509::X509Name) -> String {
     name.iter_common_name()
         .next()
@@ -69,176 +68,142 @@ fn extract_common_name(name: &x509_parser::x509::X509Name) -> String {
         .unwrap_or_else(|| "<no CN>".to_string())
 }
 
-/// Extract validity period and check if expired
+/// Extract validity period and determine expiration status
 fn extract_validity(cert: &X509Certificate) -> (String, String, bool) {
     let not_before_raw = cert.validity().not_before;
     let not_after_raw = cert.validity().not_after;
     let expired = not_after_raw < ASN1Time::now();
 
-    // Convert to ISO format for consistency with calculate_days_until_expiry
     let not_before = format_asn1_time_to_iso(&not_before_raw);
     let not_after = format_asn1_time_to_iso(&not_after_raw);
 
     (not_before, not_after, expired)
 }
 
-/// Convert ASN1Time to ISO format string
+/// Convert ASN1Time to ISO format string with multiple format fallbacks
 fn format_asn1_time_to_iso(time: &ASN1Time) -> String {
-    // Convert ASN1Time to string first
     let time_str = time.to_string();
 
-    // Try to parse the new format: "Jul  7 08:34:03 2025 +00:00"
+    // Try parsing various ASN.1 time formats in order of likelihood
     if let Ok(dt) = chrono::DateTime::parse_from_str(&time_str, "%b %d %H:%M:%S %Y %z") {
-        let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        return result;
+        return dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     }
 
-    // Try alternative format with double space: "Jul  7 08:34:03 2025 +00:00"
     if let Ok(dt) = chrono::DateTime::parse_from_str(&time_str, "%b  %d %H:%M:%S %Y %z") {
-        let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        return result;
+        return dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     }
 
-    // Try to parse common ASN.1 time formats
-    // Format 1: "YYMMDDHHMMSSZ" (YY format)
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&time_str, "%y%m%d%H%M%SZ") {
-        let result = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        return result;
     }
 
-    // Format 2: "YYYYMMDDHHMMSSZ" (YYYY format)
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&time_str, "%Y%m%d%H%M%SZ") {
-        let result = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+        return chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        return result;
     }
 
-    // Format 3: Try RFC2822 format
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&time_str) {
-        let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        return result;
+        return dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     }
 
-    // Format 4: Try RFC3339/ISO format
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&time_str) {
-        let result = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        return result;
+        return dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     }
 
     "<invalid date>".to_string()
 }
 
-/// Extract key size from public key
-fn extract_key_size(cert: &X509Certificate) -> Option<String> {
-    // Get the public key info
-    let public_key_info = cert.public_key();
+// ====================================
+// PUBLIC KEY ANALYSIS
 
-    // Check the algorithm OID first
+/// Extract key size information from certificate public key
+fn extract_key_size(cert: &X509Certificate) -> Option<String> {
+    let public_key_info = cert.public_key();
     let algorithm_oid = public_key_info.algorithm.algorithm.to_string();
+
     println!("Public key algorithm OID: {}", algorithm_oid);
 
     match public_key_info.parsed() {
         Ok(PublicKey::RSA(rsa_key)) => {
-            let bit_size = rsa_key.key_size() * 8; // Convert bytes to bits
+            let bit_size = rsa_key.key_size() * 8;
             println!("RSA key size: {} bits", bit_size);
             Some(bit_size.to_string())
         }
-        Ok(PublicKey::EC(ec_key)) => {
-            // For EC keys, we need to look at the algorithm parameters
-            extract_ec_key_size_improved(&public_key_info, &algorithm_oid)
+        Ok(PublicKey::EC(_)) => {
+            extract_ec_key_size_from_parameters(&public_key_info, &algorithm_oid)
         }
         Ok(other_key) => {
             println!("Other key type: {:?}", other_key);
-            // For other key types, try to determine from algorithm OID
             determine_key_size_from_oid(&algorithm_oid)
         }
         Err(e) => {
             println!("Failed to parse public key: {}", e);
-            // Try to determine from algorithm OID as fallback
             determine_key_size_from_oid(&algorithm_oid)
         }
     }
 }
 
-/// Improved EC key size extraction using algorithm parameters
-fn extract_ec_key_size_improved(
+/// Extract EC key size by analyzing curve parameters in certificate
+fn extract_ec_key_size_from_parameters(
     public_key_info: &x509_parser::x509::SubjectPublicKeyInfo,
     algorithm_oid: &str,
 ) -> Option<String> {
-    // Check if we have algorithm parameters
     if let Some(params) = &public_key_info.algorithm.parameters {
         println!(
             "EC algorithm parameters present: {} bytes",
             params.data.len()
         );
 
-        // Try to parse the parameters as an OID (curve identifier)
         if let Ok((_, ber_object)) = parse_der_oid(params.data) {
             if let Ok(curve_oid) = ber_object.as_oid() {
                 let curve_oid_str = curve_oid.to_string();
                 println!("EC curve OID: {}", curve_oid_str);
 
-                // Map common curve OIDs to key sizes
-                match curve_oid_str.as_str() {
+                return match curve_oid_str.as_str() {
                     "1.2.840.10045.3.1.7" => {
-                        // secp256r1 (P-256)
                         println!("Detected P-256 curve");
                         Some("256".to_string())
                     }
                     "1.3.132.0.34" => {
-                        // secp384r1 (P-384)
                         println!("Detected P-384 curve");
                         Some("384".to_string())
                     }
                     "1.3.132.0.35" => {
-                        // secp521r1 (P-521)
                         println!("Detected P-521 curve");
                         Some("521".to_string())
                     }
                     _ => {
                         println!("Unknown EC curve OID: {}", curve_oid_str);
-                        // Default to 256 for unknown curves as it's most common
-                        Some("256".to_string())
+                        Some("256".to_string()) // Most common default
                     }
-                }
-            } else {
-                println!("Failed to extract OID from BER object");
-                Some("256".to_string()) // Default assumption
-            }
-        } else {
-            // NEW: Try alternative parsing for 8-byte parameters
-            println!("Standard OID parsing failed, trying alternative methods");
-
-            // For 8-byte parameters, often it's P-256 curve
-            if params.data.len() == 8 {
-                println!("8-byte EC parameters detected - likely P-256 curve");
-                Some("256".to_string())
-            } else {
-                println!("Failed to parse EC curve OID from parameters");
-                Some("256".to_string()) // Default assumption
+                };
             }
         }
-    } else {
-        println!("No EC algorithm parameters found");
-        Some("256".to_string()) // Default assumption
+
+        // Handle non-standard EC parameter encodings
+        if params.data.len() == 8 {
+            println!("8-byte EC parameters detected - likely P-256 curve");
+            return Some("256".to_string());
+        }
     }
+
+    println!("No EC algorithm parameters found, defaulting to P-256");
+    Some("256".to_string())
 }
 
-/// Determine key size from algorithm OID as fallback
+/// Determine key size from algorithm OID when direct parsing fails
 fn determine_key_size_from_oid(algorithm_oid: &str) -> Option<String> {
     match algorithm_oid {
         "1.2.840.10045.2.1" => {
-            // ecPublicKey - generic EC, assume P-256
             println!("Generic EC public key, assuming 256 bits");
             Some("256".to_string())
         }
         "1.2.840.113549.1.1.1" => {
-            // rsaEncryption - can't determine size without parsing the key
-            println!("RSA encryption algorithm, size unknown");
-            Some("2048".to_string()) // Common default
+            println!("RSA encryption algorithm, defaulting to 2048 bits");
+            Some("2048".to_string())
         }
         _ => {
             println!("Unknown algorithm OID: {}", algorithm_oid);
@@ -247,7 +212,10 @@ fn determine_key_size_from_oid(algorithm_oid: &str) -> Option<String> {
     }
 }
 
-/// Extract Subject Alternative Names
+// ====================================
+// SUBJECT ALTERNATIVE NAMES
+
+/// Extract Subject Alternative Names from certificate extensions
 fn extract_subject_alt_names(cert: &X509Certificate) -> Vec<String> {
     let mut san_list = Vec::new();
 
@@ -263,7 +231,7 @@ fn extract_subject_alt_names(cert: &X509Certificate) -> Vec<String> {
     san_list
 }
 
-/// Extract individual SAN entries
+/// Process individual Subject Alternative Name entries
 fn extract_san_entries(general_names: &[GeneralName], san_list: &mut Vec<String>) {
     for name in general_names {
         match name {
@@ -279,43 +247,38 @@ fn extract_san_entries(general_names: &[GeneralName], san_list: &mut Vec<String>
             GeneralName::RFC822Name(email) => {
                 san_list.push(email.to_string());
             }
-            _ => {} // Skip other types
+            _ => {} // Skip other SAN types
         }
     }
 }
 
-/// Format IP address (IPv4 or IPv6)
+/// Format IP address bytes as human-readable string (IPv4/IPv6)
 fn format_ip_address(ip: &[u8]) -> String {
     match ip.len() {
-        4 => {
-            // IPv4
-            format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
-        }
-        16 => {
-            // IPv6
-            ip.chunks(2)
-                .map(|chunk| format!("{:02x}{:02x}", chunk[0], chunk.get(1).unwrap_or(&0)))
-                .collect::<Vec<_>>()
-                .join(":")
-        }
-        _ => {
-            // Unknown format, use hex encoding
-            format!("IP:{}", hex::encode(ip))
-        }
+        4 => format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
+        16 => ip
+            .chunks(2)
+            .map(|chunk| format!("{:02x}{:02x}", chunk[0], chunk.get(1).unwrap_or(&0)))
+            .collect::<Vec<_>>()
+            .join(":"),
+        _ => format!("IP:{}", hex::encode(ip)),
     }
 }
 
-/// Calculate days until certificate expiry
+// ====================================
+// UTILITY FUNCTIONS
+
+/// Calculate days remaining until certificate expires
 pub fn calculate_days_until_expiry(valid_to: &str) -> Option<i64> {
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(valid_to, "%Y-%m-%dT%H:%M:%SZ") {
         let now = chrono::Utc::now().naive_utc();
-        let days = (dt - now).num_days();
-        Some(days)
-    } else if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
-        let now = chrono::Utc::now().date_naive();
-        let days = (date - now).num_days();
-        Some(days)
-    } else {
-        None
+        return Some((dt - now).num_days());
     }
+
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(valid_to, "%Y-%m-%d") {
+        let now = chrono::Utc::now().date_naive();
+        return Some((date - now).num_days());
+    }
+
+    None
 }

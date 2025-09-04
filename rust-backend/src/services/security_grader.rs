@@ -8,7 +8,7 @@ use crate::handlers::assessment_handler::{
     CertificateInfo, CipherSuiteInfo, KeyExchangeInfo, ProtocolSupport, VulnerabilityInfo,
 };
 
-// ==================
+// ====================================
 // CORE TYPES
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub struct GradeInput {
     pub weak_protocols_disabled: bool,
     pub ocsp_stapling_enabled: bool,
 
-    // NEW HTTP Security Headers
+    // HTTP Security Headers
     pub https_redirect: bool,
     pub csp_header: bool,
     pub x_frame_options: bool,
@@ -63,9 +63,10 @@ pub struct WhoisInfo {
     pub raw: String,
 }
 
-// ================================
-// WHOIS FUNCTIONALITY
+// ====================================
+// WHOIS CONFIGURATION
 
+/// Mapping of TLDs to their respective WHOIS servers
 const WHOIS_SERVERS: &[(&str, &str)] = &[
     ("com", "whois.verisign-grs.com:43"),
     ("net", "whois.verisign-grs.com:43"),
@@ -94,6 +95,7 @@ const WHOIS_SERVERS: &[(&str, &str)] = &[
     ("xyz", "whois.nic.xyz:43"),
 ];
 
+/// Registrars commonly associated with suspicious domains
 const SUSPICIOUS_REGISTRARS: &[&str] = &[
     "NameCheap",
     "Alibaba",
@@ -102,37 +104,35 @@ const SUSPICIOUS_REGISTRARS: &[&str] = &[
     "PDR Ltd.",
 ];
 
-//get the whoisserver address based on TLD (top Level Domain)
+// ====================================
+// WHOIS FUNCTIONALITY
+
+/// Resolves the appropriate WHOIS server for a given TLD
 fn get_whois_server(tld: &str) -> &'static str {
-    // First try exact match
-    if let Some((_, server)) = WHOIS_SERVERS
+    WHOIS_SERVERS
         .iter()
         .find(|(domain_tld, _)| *domain_tld == tld)
-    {
-        return server;
-    }
-
-    // For unknown TLDs, try IANA first
-    "whois.iana.org:43"
+        .map(|(_, server)| *server)
+        .unwrap_or("whois.iana.org:43")
 }
 
-//remove the "www." prefix if it exists, to get the root domain
+/// Removes www prefix to extract the root domain
 fn extract_root_domain(domain: &str) -> &str {
-    if domain.starts_with("www.") {
-        &domain[4..]
-    } else {
-        domain
-    }
+    domain.strip_prefix("www.").unwrap_or(domain)
 }
 
+/// Extracts the top-level domain from a domain name
+fn extract_tld(domain: &str) -> String {
+    domain.split('.').last().unwrap_or("").to_lowercase()
+}
+
+/// Performs WHOIS lookup for a domain with referral server handling
 pub fn whois_query(domain: &str) -> Result<String, String> {
-    let root_domain = extract_root_domain(domain); // Extract root domain first
-    let tld = extract_tld(root_domain); // Get TLD from root domain
+    let root_domain = extract_root_domain(domain);
+    let tld = extract_tld(root_domain);
     let server = get_whois_server(&tld);
 
-    //connect and request registration information from the whois server
     match query_whois_server(root_domain, server) {
-        // Query root domain
         Ok(response) => {
             if let Some(referral_server) = extract_referral_server(&response) {
                 query_whois_server(root_domain, &referral_server).or(Ok(response))
@@ -144,6 +144,7 @@ pub fn whois_query(domain: &str) -> Result<String, String> {
     }
 }
 
+/// Extracts referral WHOIS server from initial response
 fn extract_referral_server(response: &str) -> Option<String> {
     for line in response.lines() {
         let line_lower = line.to_lowercase();
@@ -159,72 +160,10 @@ fn extract_referral_server(response: &str) -> Option<String> {
     None
 }
 
-// ==============
-// GRADING SYSTEM
-
-pub fn grade_site(input: &GradeInput, _certificate: &CertificateInfo) -> (Grade, Vec<String>) {
-    let mut score = 100; //set score to 100 and initialise 
-    let mut reasons = Vec::new();
-
-    apply_protocol_penalties(&mut score, &mut reasons, input); //apply penalities
-    apply_certificate_penalties(&mut score, &mut reasons, input);
-    apply_security_feature_penalties(&mut score, &mut reasons, input);
-    apply_http_security_penalties(&mut score, &mut reasons, input);
-
-    let mut grade = calculate_grade_from_score(score); //match score to grade
-
-    // Cap grade at B if TLS 1.2 or 1.3 is supported AND TLS 1.1 is also supported
-    if (input.tls12_supported || input.tls13_supported)
-        && input.tls11_supported
-        && grade != Grade::F
-    {
-        if grade == Grade::APlus || grade == Grade::A {
-            grade = Grade::B;
-            reasons.push(
-                "Grade capped at B due to support for obsolete TLS 1.1 protocol.".to_string(),
-            );
-        }
-    }
-
-    (grade, reasons)
-}
-
-pub fn get_or_run_scan(
-    domain: &str,
-    input: &GradeInput,
-    certificate: &CertificateInfo,
-    _protocols: &ProtocolSupport,
-    _cipher_suites: &CipherSuiteInfo,
-    _vulnerabilities: &VulnerabilityInfo,
-    _key_exchange: &KeyExchangeInfo,
-    whois_response: Option<&str>,
-) -> (Grade, Option<String>) {
-    let (mut grade, _technical_reasons) = grade_site(input, certificate); //call the previous function 
-    let whois_info = whois_response.map(parse_whois_response);
-
-    let whois_issues = check_whois_issues(domain, &whois_info, &mut grade);
-    let explanation = if whois_issues.is_empty() {
-        None
-    } else {
-        Some(whois_issues.join(" "))
-    };
-
-    (grade, explanation)
-}
-
-// =========================
-// WHOIS HELPER FUNCTIONS
-
-//get the TLD (Top Level Domain) from a domain name
-fn extract_tld(domain: &str) -> String {
-    domain.split('.').last().unwrap_or("").to_lowercase()
-}
-
-//connect to the whois server and query for domain information
+/// Establishes TCP connection to WHOIS server and retrieves domain information
 fn query_whois_server(domain: &str, server: &str) -> Result<String, String> {
     use std::net::ToSocketAddrs;
 
-    //parse the server address and port
     let (hostname, port) = if server.contains(':') {
         let parts: Vec<&str> = server.split(':').collect();
         (parts[0], parts[1].parse::<u16>().unwrap_or(43))
@@ -232,14 +171,12 @@ fn query_whois_server(domain: &str, server: &str) -> Result<String, String> {
         (server, 43)
     };
 
-    //resolve the hostname to an address
     let addr = format!("{}:{}", hostname, port)
         .to_socket_addrs()
         .map_err(|e| format!("Failed to resolve {}: {}", hostname, e))?
         .next()
         .ok_or_else(|| format!("No addresses found for {}", hostname))?;
 
-    //connect to the whois server
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
 
@@ -262,6 +199,22 @@ fn query_whois_server(domain: &str, server: &str) -> Result<String, String> {
     Ok(response)
 }
 
+// ====================================
+// WHOIS PARSING
+
+/// Parses WHOIS response to extract structured information
+fn parse_whois_response(response: &str) -> WhoisInfo {
+    let creation_date = extract_creation_date(response);
+    let registrar = extract_registrar(response);
+
+    WhoisInfo {
+        creation_date,
+        registrar,
+        raw: response.to_string(),
+    }
+}
+
+/// Extracts domain creation date from WHOIS response using multiple patterns
 fn extract_creation_date(response: &str) -> Option<NaiveDateTime> {
     let date_patterns = [
         "creation date",
@@ -279,7 +232,6 @@ fn extract_creation_date(response: &str) -> Option<NaiveDateTime> {
                 if let Some(idx) = line.find(':') {
                     let date_str = line[idx + 1..].trim();
 
-                    // Try multiple date formats
                     let formats = [
                         "%Y-%m-%dT%H:%M:%SZ",
                         "%Y-%m-%d %H:%M:%S",
@@ -305,6 +257,7 @@ fn extract_creation_date(response: &str) -> Option<NaiveDateTime> {
     None
 }
 
+/// Extracts registrar information from WHOIS response
 fn extract_registrar(response: &str) -> Option<String> {
     for line in response.lines() {
         if line.to_lowercase().contains("registrar:") {
@@ -316,56 +269,110 @@ fn extract_registrar(response: &str) -> Option<String> {
     None
 }
 
-// ============================
-// GRADING HELPER FUNCTIONS
+// ====================================
+// SECURITY GRADING SYSTEM
 
+/// Main grading function that applies penalty system to generate security score
+pub fn grade_site(input: &GradeInput, _certificate: &CertificateInfo) -> (Grade, Vec<String>) {
+    let mut score = 100;
+    let mut reasons = Vec::new();
+
+    apply_protocol_penalties(&mut score, &mut reasons, input);
+    apply_certificate_penalties(&mut score, &mut reasons, input);
+    apply_security_feature_penalties(&mut score, &mut reasons, input);
+    apply_http_security_penalties(&mut score, &mut reasons, input);
+
+    let mut grade = calculate_grade_from_score(score);
+
+    // Grade capping: TLS 1.1 support limits grade to B maximum
+    if (input.tls12_supported || input.tls13_supported)
+        && input.tls11_supported
+        && grade != Grade::F
+    {
+        if grade == Grade::APlus || grade == Grade::A {
+            grade = Grade::B;
+            reasons.push(
+                "Grade capped at B due to support for obsolete TLS 1.1 protocol.".to_string(),
+            );
+        }
+    }
+
+    (grade, reasons)
+}
+
+/// Combines technical security assessment with domain reputation analysis
+pub fn get_or_run_scan(
+    domain: &str,
+    input: &GradeInput,
+    certificate: &CertificateInfo,
+    _protocols: &ProtocolSupport,
+    _cipher_suites: &CipherSuiteInfo,
+    _vulnerabilities: &VulnerabilityInfo,
+    _key_exchange: &KeyExchangeInfo,
+    whois_response: Option<&str>,
+) -> (Grade, Option<String>) {
+    let (mut grade, _technical_reasons) = grade_site(input, certificate);
+    let whois_info = whois_response.map(parse_whois_response);
+
+    let whois_issues = check_whois_issues(domain, &whois_info, &mut grade);
+    let explanation = if whois_issues.is_empty() {
+        None
+    } else {
+        Some(whois_issues.join(" "))
+    };
+
+    (grade, explanation)
+}
+
+// ====================================
+// PENALTY APPLICATION FUNCTIONS
+
+/// Applies penalties for TLS protocol support
 fn apply_protocol_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &GradeInput) {
-    // Immediate F if TLS 1.0 is supported
+    // Critical failure: TLS 1.0 support
     if input.tls10_supported {
         *score = 0;
         reasons.push("Supports obsolete TLS 1.0 protocol (grade override to F).".to_string());
         return;
     }
 
-    // Major penalty if TLS 1.1 is supported
-    if input.tls11_supported {
-        *score -= 40;
-        reasons.push("Supports obsolete TLS 1.1 protocol (major penalty applied).".to_string());
-    }
-
-    // Check if ANY modern TLS version is supported
+    // Critical failure: No modern TLS support
     if !input.tls12_supported && !input.tls13_supported {
         *score = 0;
         reasons.push("Does not support any modern TLS version (1.2 or 1.3).".to_string());
         return;
     }
 
-    // Bonus/neutral for TLS configurations
-    if input.tls13_supported && input.tls12_supported {
-        // Ideal configuration - no penalty, good compatibility
-    } else if input.tls13_supported {
-        // TLS 1.3 only - great security, no penalty
-    } else if input.tls12_supported {
-        *score -= 10; // Only TLS 1.2 - missing modern standard
+    // Major penalty: TLS 1.1 support
+    if input.tls11_supported {
+        *score -= 40;
+        reasons.push("Supports obsolete TLS 1.1 protocol (major penalty applied).".to_string());
+    }
+
+    // Minor penalty: Missing TLS 1.3
+    if input.tls12_supported && !input.tls13_supported {
+        *score -= 10;
         reasons.push("Does not support TLS 1.3 (recommended modern standard).".to_string());
     }
 }
 
+/// Applies penalties for certificate-related issues
 fn apply_certificate_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &GradeInput) {
-    // FATAL CONDITIONS (Score = 0):
+    // Critical failure: Invalid or expired certificate
     if !input.cert_valid || input.cert_expired {
         *score = 0;
         reasons.push("Certificate is invalid or expired.".to_string());
         return;
     }
 
-    // WEAK KEY: < 2048-bit  -15 points (1024-bit, 512-bit)in
+    // High penalty: Weak key strength (< 2048-bit RSA)
     if !input.cert_key_strength_ok {
         *score -= 15;
         reasons.push("Certificate uses a weak key (e.g., < 2048-bit).".to_string());
     }
 }
 
+/// Applies penalties for missing security features
 fn apply_security_feature_penalties(
     score: &mut i32,
     reasons: &mut Vec<String>,
@@ -387,8 +394,8 @@ fn apply_security_feature_penalties(
     }
 }
 
+/// Applies penalties for missing HTTP security headers
 fn apply_http_security_penalties(score: &mut i32, reasons: &mut Vec<String>, input: &GradeInput) {
-    // HTTP Security Headers (Mozilla comparison)
     if !input.https_redirect {
         *score -= 10;
         reasons.push("HTTP does not redirect to HTTPS.".to_string());
@@ -415,6 +422,7 @@ fn apply_http_security_penalties(score: &mut i32, reasons: &mut Vec<String>, inp
     }
 }
 
+/// Converts numeric score to letter grade
 fn calculate_grade_from_score(score: i32) -> Grade {
     match score {
         95..=100 => Grade::APlus,
@@ -425,6 +433,10 @@ fn calculate_grade_from_score(score: i32) -> Grade {
     }
 }
 
+// ====================================
+// DOMAIN REPUTATION ANALYSIS
+
+/// Evaluates domain reputation factors that may override technical grade
 fn check_whois_issues(
     domain: &str,
     whois_info: &Option<WhoisInfo>,
@@ -441,6 +453,7 @@ fn check_whois_issues(
     issues
 }
 
+/// Checks domain age for phishing risk assessment
 fn check_domain_age(domain: &str, whois: &WhoisInfo, grade: &mut Grade, issues: &mut Vec<String>) {
     if let Some(creation) = whois.creation_date {
         let now = chrono::Utc::now().naive_utc();
@@ -460,6 +473,7 @@ fn check_domain_age(domain: &str, whois: &WhoisInfo, grade: &mut Grade, issues: 
     }
 }
 
+/// Flags domains with privacy-protected WHOIS information
 fn check_privacy_protection(whois: &WhoisInfo, issues: &mut Vec<String>) {
     let raw_lower = whois.raw.to_lowercase();
     if raw_lower.contains("redacted for privacy") || raw_lower.contains("privacy protection") {
@@ -470,6 +484,7 @@ fn check_privacy_protection(whois: &WhoisInfo, issues: &mut Vec<String>) {
     }
 }
 
+/// Identifies domains registered with suspicious registrars
 fn check_suspicious_registrar(whois: &WhoisInfo, issues: &mut Vec<String>) {
     if let Some(registrar) = &whois.registrar {
         for suspicious in SUSPICIOUS_REGISTRARS {
@@ -486,6 +501,9 @@ fn check_suspicious_registrar(whois: &WhoisInfo, issues: &mut Vec<String>) {
         }
     }
 }
+
+// ====================================
+// GRADE IMPLEMENTATION
 
 impl Grade {
     pub fn as_str(&self) -> &'static str {
@@ -506,16 +524,5 @@ impl Grade {
             Grade::C => "Poor security configuration",
             Grade::F => "Failed security configuration",
         }
-    }
-}
-
-fn parse_whois_response(response: &str) -> WhoisInfo {
-    let creation_date = extract_creation_date(response);
-    let registrar = extract_registrar(response);
-
-    WhoisInfo {
-        creation_date,
-        registrar,
-        raw: response.to_string(),
     }
 }
