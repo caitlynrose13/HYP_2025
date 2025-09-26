@@ -97,7 +97,8 @@
 <main class="tab-container">
   <header class="tab-header">
     <div class="tab-header-left">
-      <img src="/vite.svg" alt="App Logo" class="tab-logo" />
+      <!-- Header logo -->
+      <img src="/logo.png" alt="App Logo" class="tab-logo" />
       <span class="tab-title">TLS Security Report</span>
     </div>
     <button class="tab-close" on:click={handleGoBack} aria-label="Close Tab"
@@ -126,7 +127,8 @@
     <!-- Grade Comparison Cards -->
     <div class="summary-comparison">
       <div class="comparison-card our-analysis">
-        <img src="/vite.svg" alt="Our Analysis" class="comparison-logo" />
+        <!-- Summary card logo (Our Analysis) -->
+        <img src="/logo.png" alt="Our Analysis" class="comparison-logo" />
         <div class="comparison-label">TLS Analyser</div>
         <div class="comparison-grade">
           Grade: <span
@@ -148,7 +150,7 @@
       </div>
       <div class="comparison-card">
         <img
-          src="/mozilla.jpg"
+          src="/mozzilalogo.png"
           alt="Mozilla Observatory"
           class="comparison-logo"
         />
@@ -188,7 +190,7 @@
         </div>
       </div>
       <div class="comparison-card">
-        <img src="/ssllabs.jpg" alt="SSL Labs" class="comparison-logo" />
+        <img src="/sslabs.jpg" alt="SSL Labs" class="comparison-logo" />
         <div class="comparison-label">SSL Labs</div>
         <div class="comparison-grade">
           {#if ssllabsLoading}
@@ -604,11 +606,20 @@
     margin-bottom: 12px;
     border-radius: 12px;
     object-fit: cover;
+    object-position: center;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
     background: var(--card-background-color);
     border: 2px solid var(--border-color);
-    padding: 8px;
-    transition: all 0.3s ease;
+    padding: 0;
+    display: block;
+  }
+
+  /* Mobile */
+  @media (max-width: 768px) {
+    .comparison-logo {
+      width: 48px;
+      height: 48px;
+    }
   }
 
   .comparison-card {
